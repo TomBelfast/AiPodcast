@@ -764,6 +764,7 @@ export default function Home() {
               onChange={(e) => setLanguage(e.target.value)}
               disabled={isLoading}
               className="monolith-select"
+              suppressHydrationWarning
             >
               {languages.map((lang) => (
                 <option key={lang.code} value={lang.code}>
@@ -783,6 +784,7 @@ export default function Home() {
               className="excavated-input"
               placeholder="Podcast Title"
               disabled={isLoading}
+              suppressHydrationWarning
             />
           </div>
 
@@ -797,6 +799,7 @@ export default function Home() {
                 className="excavated-input"
                 placeholder="https://example.com/article"
                 disabled={isLoading}
+                suppressHydrationWarning
               />
             </div>
           ) : (
@@ -965,8 +968,9 @@ export default function Home() {
                 className="monolith-select"
                 value={selectedVoice1}
                 onChange={(e) => setSelectedVoice1(e.target.value)}
+                suppressHydrationWarning
               >
-                {availableVoices.map(v => <option key={v.id} value={v.id}>{v.name} {v.category ? `(${v.category})` : ''}</option>)}
+                {availableVoices.filter(v => v.id).map((v, idx) => <option key={`voice1-${v.id || idx}`} value={v.id}>{v.name} {v.category ? `(${v.category})` : ''}</option>)}
               </select>
             </div>
 
@@ -976,8 +980,9 @@ export default function Home() {
                 className="monolith-select"
                 value={selectedVoice2}
                 onChange={(e) => setSelectedVoice2(e.target.value)}
+                suppressHydrationWarning
               >
-                {availableVoices.map(v => <option key={v.id} value={v.id}>{v.name} {v.category ? `(${v.category})` : ''}</option>)}
+                {availableVoices.filter(v => v.id).map((v, idx) => <option key={`voice2-${v.id || idx}`} value={v.id}>{v.name} {v.category ? `(${v.category})` : ''}</option>)}
               </select>
             </div>
           </div>
@@ -1008,8 +1013,8 @@ export default function Home() {
                 ) : (
                   <>
                     {/* Server files */}
-                    {archivedFiles.map((file) => (
-                      <div key={file.name} style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+                    {archivedFiles.map((file, idx) => (
+                      <div key={`server-${file.name || idx}`} style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ color: '#fff', fontSize: '12px', fontWeight: 500, marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</div>
                           <div style={{ color: '#666', fontSize: '10px' }}>{(file.size / 1024 / 1024).toFixed(2)} MB</div>
@@ -1040,8 +1045,8 @@ export default function Home() {
                       </div>
                     ))}
                     {/* Local storage files */}
-                    {localHistory.map((item) => (
-                      <div key={item.id} style={{ padding: '10px', background: 'rgba(37, 211, 102, 0.05)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', border: '1px solid rgba(37, 211, 102, 0.2)' }}>
+                    {localHistory.map((item, idx) => (
+                      <div key={`local-${item.id || idx}`} style={{ padding: '10px', background: 'rgba(37, 211, 102, 0.05)', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', border: '1px solid rgba(37, 211, 102, 0.2)' }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ color: '#fff', fontSize: '12px', fontWeight: 500, marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title}</div>
                           <div style={{ color: '#666', fontSize: '10px' }}>
