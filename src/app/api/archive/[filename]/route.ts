@@ -7,10 +7,10 @@ const ARCHIVE_DIR = path.join(process.cwd(), 'archive');
 // GET - Download a specific archived file
 export async function GET(
   req: NextRequest,
-  { params }: { params: { filename: string } }
+  { params }: { params: Promise<{ filename: string }> }
 ) {
   try {
-    const filename = params.filename;
+    const { filename } = await params;
     
     // Security: prevent path traversal
     if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
@@ -36,7 +36,7 @@ export async function GET(
     const fileBuffer = await fs.readFile(filePath);
     
     // Return file with appropriate headers
-    return new NextResponse(fileBuffer, {
+    return new NextResponse(new Uint8Array(fileBuffer), {
       headers: {
         'Content-Type': 'audio/mpeg',
         'Content-Disposition': `attachment; filename="${filename}"`,

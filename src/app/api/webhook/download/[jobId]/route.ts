@@ -7,10 +7,10 @@ const ARCHIVE_DIR = path.join(process.cwd(), 'archive');
 // GET - Download audio file by jobId
 export async function GET(
   req: NextRequest,
-  { params }: { params: { jobId: string } }
+  { params }: { params: Promise<{ jobId: string }> }
 ) {
   try {
-    const jobId = params.jobId;
+    const { jobId } = await params;
 
     if (!jobId) {
       return NextResponse.json(
@@ -37,7 +37,7 @@ export async function GET(
     const fileBuffer = await fs.readFile(filePath);
 
     // Return file with appropriate headers
-    return new NextResponse(fileBuffer, {
+    return new NextResponse(new Uint8Array(fileBuffer), {
       headers: {
         'Content-Type': 'audio/mpeg',
         'Content-Disposition': `attachment; filename="${matchingFile}"`,

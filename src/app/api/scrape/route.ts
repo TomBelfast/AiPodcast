@@ -29,8 +29,8 @@ export async function POST(req: NextRequest) {
     console.log('Scrape result:', JSON.stringify(result, null, 2));
 
     // Check if we have markdown content, regardless of success flag
-    const markdown = result.markdown || result.data?.markdown || '';
-    const metadata = result.metadata || result.data?.metadata || {};
+    const markdown = result.markdown || '';
+    const metadata = result.metadata || {};
 
     console.log('Extracted markdown length:', markdown.length);
     console.log('Metadata:', metadata);
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
     if (!markdown || markdown.length < 10) {
       console.log('No meaningful content extracted');
       return NextResponse.json({ 
-        error: `Failed to extract content from URL. Success: ${result.success}, Error: ${result.error || 'No meaningful content found'}` 
+        error: `Failed to extract content from URL. Error: ${'No meaningful content found'}` 
       }, { status: 500 });
     }
 

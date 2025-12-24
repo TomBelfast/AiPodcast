@@ -5,7 +5,7 @@ export async function GET(req: NextRequest) {
   try {
     // Dynamic import for MinIO
     const minioModule = await import('minio');
-    const MinIO = minioModule.default || minioModule;
+    const MinIO = (minioModule as any).default || minioModule;
     
     // Parse endpoint - Nginx proxies external address to internal port 9002
     let endPoint = process.env.MINIO_ENDPOINT || 'minio2-api.aihub.ovh';

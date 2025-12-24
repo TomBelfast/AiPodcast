@@ -96,8 +96,11 @@ Language: ${languageName} (${selectedLanguage})`,
     // Collect the full conversation
     let fullConversation: Array<{ speaker: string; text: string }> = [];
     for await (const chunk of result.partialObjectStream) {
-      if (chunk.conversation) {
-        fullConversation = chunk.conversation;
+      if (chunk.conversation && Array.isArray(chunk.conversation)) {
+        fullConversation = chunk.conversation.map((item: any) => ({
+          speaker: item.speaker || '',
+          text: item.text || ''
+        }));
       }
     }
 

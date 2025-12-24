@@ -74,9 +74,9 @@ export async function POST(req: NextRequest) {
     let minioUrl: string | null = null;
     if (uploadToMinIO) {
       try {
-        const minioResult = await uploadToMinIOStorage(audioBase64, title || 'podcast', jobId);
+        const minioResult = await uploadToMinIOStorage(audioBase64, title ?? 'podcast', jobId);
         if (minioResult.success) {
-          minioUrl = minioResult.url;
+          minioUrl = minioResult.url ?? null;
         }
       } catch (minioError) {
         console.error('Error uploading to MinIO:', minioError);
@@ -114,7 +114,7 @@ async function uploadToMinIOStorage(
   try {
     // Dynamic import to avoid loading MinIO if not needed
     const minioModule = await import('minio');
-    const MinIO = minioModule.default || minioModule;
+    const MinIO = (minioModule as any).default || minioModule;
     
     // Check if MinIO is configured
     if (!process.env.MINIO_ACCESS_KEY || !process.env.MINIO_SECRET_KEY) {
