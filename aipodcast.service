@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Podcast Generator Next.js Application
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/AiPodcast
+EnvironmentFile=/root/AiPodcast/.env.local
+ExecStartPre=/usr/bin/bash -c 'cd /root/AiPodcast && [ -d .next ] || (NODE_ENV=development npm install && npm run build)'
+ExecStart=/usr/bin/env NODE_ENV=production /usr/bin/node /root/AiPodcast/node_modules/next/dist/bin/next start -p 3300
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

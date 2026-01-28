@@ -17,7 +17,17 @@ const podcastSchema = z.object({
 // POST - Process transcript and generate conversation
 export async function POST(req: NextRequest) {
   try {
-    const { jobId, transcript, title, language = 'en', metadata } = await req.json();
+    const { 
+      jobId, 
+      transcript, 
+      title, 
+      language = 'en', 
+      metadata,
+      mainPrompt,
+      polishEndingPrompt,
+      hostPersonalitiesPromptPolish,
+      hostPersonalitiesPromptOther,
+    } = await req.json();
 
     if (!transcript || !jobId) {
       return NextResponse.json(
@@ -77,6 +87,67 @@ export async function POST(req: NextRequest) {
 
     const languageName = languageNames[selectedLanguage] || 'English';
 
+    // Default prompts
+    const defaultPolishEndingPrompt = `CRITICAL - ENDING FOR POLISH PODCASTS:
+At the very end of the conversation, one of the speakers (either Speaker1 or Speaker2) MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
+- Speaker1: "A pamiętajcie, darmowy PDF z naszego podcastu można pobrać w linku pod filmem!"
+- Speaker2: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
+- Speaker1: "I jeszcze jedna rzecz - darmowy PDF z naszego podcastu znajdziecie w linku pod filmem!"
+The statement should feel natural and conversational, using the speaker's dialect (Silesian for Speaker1, Goral for Speaker2). Always include this ending for Polish podcasts.`;
+
+    const defaultHostPersonalitiesPolish = `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- CRITICAL: Use MASCULINE grammatical forms in Polish
+  * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
+  * Use masculine verb endings and adjectives that agree with the male speaker
+- DIALECT: Speaker1 should use SILESIAN dialect (śląski)
+  * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
+  * Silesian grammatical features: "idymy" instead of "idziemy", "robimy" stays similar, but with Silesian intonation patterns
+  * Natural Silesian expressions and word order
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- CRITICAL: Use FEMININE grammatical forms in Polish
+  * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
+  * Use feminine verb endings and adjectives that agree with the female speaker
+- DIALECT: Speaker2 should use GORAL (Highland) dialect (góralski)
+  * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
+  * Goral grammatical features and intonation patterns
+  * Natural Goral expressions and word order
+- Skeptical and questions everything
+- Sometimes condescending or dismissive
+- Uses more formal or sophisticated language`;
+
+    const defaultHostPersonalitiesOther = `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- Use appropriate grammatical forms for male speaker in {LANGUAGE}
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- Use appropriate grammatical forms for female speaker in {LANGUAGE}
+- Skeptical and questions everything
+- Sometimes condescending or dismissive
+- Uses more formal or sophisticated language`;
+
+    // Build prompt with language-specific instructions - use provided prompts or defaults
+    let dialectInstructions = '';
+    if (selectedLanguage === 'pl') {
+      dialectInstructions = '\n' + (hostPersonalitiesPromptPolish || defaultHostPersonalitiesPolish);
+    } else {
+      const personalitiesPrompt = hostPersonalitiesPromptOther || defaultHostPersonalitiesOther;
+      dialectInstructions = '\n' + personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
+    }
+
+    const usedPolishEndingPrompt = polishEndingPrompt || defaultPolishEndingPrompt;
+
     // Generate conversation from transcript
     const result = await streamObject({
       model,
@@ -85,12 +156,15 @@ export async function POST(req: NextRequest) {
       The conversation should be in ${languageName} language.
       Make it engaging, conversational, and natural. Add appropriate pauses, reactions, and dialogue flow.
       All dialogue should be in ${languageName}.
+      ${dialectInstructions}
 
 Transcript:
 ${transcript}
 
 Title: ${title || 'Untitled Podcast'}
-Language: ${languageName} (${selectedLanguage})`,
+Language: ${languageName} (${selectedLanguage})
+
+${selectedLanguage === 'pl' ? usedPolishEndingPrompt : ''}`,
     });
 
     // Collect the full conversation

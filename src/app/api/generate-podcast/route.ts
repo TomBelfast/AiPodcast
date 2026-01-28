@@ -22,7 +22,15 @@ const podcastSchema = z.object({
 
 export async function POST(req: NextRequest) {
   try {
-    const { content, title, language = 'en' } = await req.json();
+    const { 
+      content, 
+      title, 
+      language = 'en',
+      mainPrompt,
+      polishEndingPrompt,
+      hostPersonalitiesPromptPolish,
+      hostPersonalitiesPromptOther,
+    } = await req.json();
 
     if (!content) {
       return NextResponse.json(
@@ -67,16 +75,25 @@ export async function POST(req: NextRequest) {
     
     const model = openaiClient(modelName);
 
-    let result;
-    try {
-      result = streamObject({
-        model,
-        schema: podcastSchema,
-        prompt: `Create a highly dynamic, natural podcast conversation between two speakers about the following content. Make it feel like real people having an authentic conversation with interruptions, overlaps, and organic flow.
+    // Determine language name
+    const languageNames: Record<string, string> = {
+      en: 'English',
+      pl: 'Polish',
+      es: 'Spanish',
+      fr: 'French',
+      de: 'German',
+      it: 'Italian',
+      pt: 'Portuguese',
+      ru: 'Russian',
+      ja: 'Japanese',
+      ko: 'Korean',
+      zh: 'Chinese',
+    };
+    const languageName = languageNames[language] || 'English';
+    const isPolish = language === 'pl';
 
-IMPORTANT: Generate the conversation in ${language === 'en' ? 'English' : language === 'pl' ? 'Polish' : language === 'es' ? 'Spanish' : language === 'fr' ? 'French' : language === 'de' ? 'German' : language === 'it' ? 'Italian' : language === 'pt' ? 'Portuguese' : language === 'ru' ? 'Russian' : language === 'ja' ? 'Japanese' : language === 'ko' ? 'Korean' : language === 'zh' ? 'Chinese' : 'English'} language.
-
-CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, and measurements as full words in the conversation text. This is essential for proper text-to-speech conversion.
+    // Use prompts from request or fallback to defaults
+    const defaultMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, and measurements as full words in the conversation text. This is essential for proper text-to-speech conversion.
 
 Examples for English:
 - "5" → "five"
@@ -98,43 +115,6 @@ Examples for Polish:
 - "50%" → "pięćdziesiąt procent"
 
 Never use digits (0-9), numeric symbols, or abbreviations in the conversation text. Always spell out numbers completely as words in the target language.
-
-Title: ${title || "Article"}
-
-Content: ${content}
-
-HOST PERSONALITIES:
-Speaker1 (Male - Energetic & Naive):
-- MALE speaker with an extremely enthusiastic and optimistic personality
-- CRITICAL: Use MASCULINE grammatical forms (in languages with gender inflection like Polish, Russian, etc.)
-  * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
-  * Use masculine verb endings and adjectives that agree with the male speaker
-- DIALECT: For Polish language, Speaker1 should use SILESIAN dialect (śląski)
-  * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
-  * Silesian grammatical features: "idymy" instead of "idziemy", "robimy" stays similar, but with Silesian intonation patterns
-  * Natural Silesian expressions and word order
-- Easily excited by new concepts and ideas
-- Asks lots of questions, sometimes obvious ones
-- Uses exclamation points frequently and energetic language
-- Tends to see the bright side of everything
-- Sometimes misses subtleties or nuances
-- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
-
-Speaker2 (Female - Pessimistic & Arrogant):
-- FEMALE speaker who is skeptical and cynical about most claims
-- CRITICAL: Use FEMININE grammatical forms (in languages with gender inflection like Polish, Russian, etc.)
-  * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
-  * Use feminine verb endings and adjectives that agree with the female speaker
-- DIALECT: For Polish language, Speaker2 should use GORAL (Highland) dialect (góralski)
-  * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
-  * Goral grammatical features: "som" instead of "są", "robia" instead of "robią", typical Goral intonation
-  * Natural Goral expressions and word order with characteristic melodic patterns
-- Knows everything (or thinks they do)
-- Often corrects or challenges Speaker1
-- Uses condescending language and sighs frequently
-- Points out flaws, problems, and downsides
-- Makes sarcastic comments and eye-rolls
-- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."
 
 CRITICAL: Make this conversation feel REAL and DYNAMIC with these specific patterns:
 
@@ -194,7 +174,102 @@ SYNTAX AND GRAMMATICAL CORRECTNESS:
   * Examples of INCORRECT to avoid: "lanie pod zimną wodę" (should be "polewanie zimną wodą"), "działanie pod presje" (should be "działanie pod presją")
 - Use natural, idiomatic expressions that sound natural to native speakers
 - Double-check that all noun phrases, verb phrases, and sentence structures follow the rules of the target language
-- If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones
+- If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`;
+
+    const defaultPolishEndingPrompt = `CRITICAL - ENDING FOR POLISH PODCASTS:
+At the very end of the conversation, one of the speakers (either Speaker1 or Speaker2) MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
+- Speaker1: "A pamiętajcie, darmowy PDF z naszego podcastu można pobrać w linku pod filmem!"
+- Speaker2: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
+- Speaker1: "I jeszcze jedna rzecz - darmowy PDF z naszego podcastu znajdziecie w linku pod filmem!"
+The statement should feel natural and conversational, using the speaker's dialect (Silesian for Speaker1, Goral for Speaker2). Always include this ending for Polish podcasts.`;
+
+    const defaultHostPersonalitiesPolish = `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- CRITICAL: Use MASCULINE grammatical forms in Polish
+  * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
+  * Use masculine verb endings and adjectives that agree with the male speaker
+- DIALECT: Speaker1 should use SILESIAN dialect (śląski)
+  * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
+  * Silesian grammatical features: "idymy" instead of "idziemy", "robimy" stays similar, but with Silesian intonation patterns
+  * Natural Silesian expressions and word order
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+- Tends to see the bright side of everything
+- Sometimes misses subtleties or nuances
+- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- CRITICAL: Use FEMININE grammatical forms in Polish
+  * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
+  * Use feminine verb endings and adjectives that agree with the female speaker
+- DIALECT: Speaker2 should use GORAL (Highland) dialect (góralski)
+  * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
+  * Goral grammatical features: "som" instead of "są", "robia" instead of "robią", typical Goral intonation
+  * Natural Goral expressions and word order with characteristic melodic patterns
+- Knows everything (or thinks they do)
+- Often corrects or challenges Speaker1
+- Uses condescending language and sighs frequently
+- Points out flaws, problems, and downsides
+- Makes sarcastic comments and eye-rolls
+- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
+
+    const defaultHostPersonalitiesOther = `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- CRITICAL: Use MASCULINE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate masculine grammatical forms, verb endings and adjectives that agree with the male speaker
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+- Tends to see the bright side of everything
+- Sometimes misses subtleties or nuances
+- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- CRITICAL: Use FEMININE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate feminine grammatical forms, verb endings and adjectives that agree with the female speaker
+- Knows everything (or thinks they do)
+- Often corrects or challenges Speaker1
+- Uses condescending language and sighs frequently
+- Points out flaws, problems, and downsides
+- Makes sarcastic comments and eye-rolls
+- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
+
+    // Use prompts from request or fallback to defaults
+    const usedMainPrompt = mainPrompt || defaultMainPrompt;
+    const usedPolishEndingPrompt = polishEndingPrompt || defaultPolishEndingPrompt;
+    
+    // Build host personalities section - use provided prompts or defaults
+    let hostPersonalitiesSection = '';
+    if (isPolish) {
+      hostPersonalitiesSection = hostPersonalitiesPromptPolish || defaultHostPersonalitiesPolish;
+    } else {
+      const personalitiesPrompt = hostPersonalitiesPromptOther || defaultHostPersonalitiesOther;
+      hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
+    }
+
+    let result;
+    try {
+      result = streamObject({
+        model,
+        schema: podcastSchema,
+        prompt: `Create a highly dynamic, natural podcast conversation between two speakers about the following content. Make it feel like real people having an authentic conversation with interruptions, overlaps, and organic flow.
+
+IMPORTANT: Generate the conversation in ${languageName} language.
+
+Title: ${title || "Article"}
+
+Content: ${content}
+
+${hostPersonalitiesSection}
+
+${usedMainPrompt}
+
+${isPolish ? usedPolishEndingPrompt : ''}
 
 IMPORTANT: Keep the TOTAL conversation under 2500 characters to fit within API limits. Aim for 8-12 short, punchy exchanges that pack maximum impact. Focus on the most interesting or surprising aspects of the content.`,
       });

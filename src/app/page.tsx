@@ -16,6 +16,10 @@ interface Settings {
   autoGenerateAudio: boolean;
   url: string;
   useTranscript: boolean;
+  mainPrompt?: string;
+  polishEndingPrompt?: string;
+  hostPersonalitiesPromptPolish?: string;
+  hostPersonalitiesPromptOther?: string;
 }
 
 interface HistoryItem {
@@ -47,6 +51,155 @@ const saveSettings = (settings: Partial<Settings>) => {
     console.error('Error saving settings:', error);
   }
 };
+
+// Default prompt templates
+const getDefaultPrompts = () => ({
+  mainPrompt: `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, and measurements as full words in the conversation text. This is essential for proper text-to-speech conversion.
+
+Examples for English:
+- "5" → "five"
+- "23" → "twenty-three"  
+- "100" → "one hundred"
+- "250" → "two hundred fifty"
+- "1000" → "one thousand"
+- "2024" → "two thousand twenty-four"
+- "50%" → "fifty percent"
+- "$100" → "one hundred dollars"
+
+Examples for Polish:
+- "5" → "pięć"
+- "23" → "dwadzieścia trzy"
+- "100" → "sto"
+- "250" → "dwieście pięćdziesiąt"
+- "1000" → "tysiąc"
+- "2024" → "dwa tysiące dwadzieścia cztery"
+- "50%" → "pięćdziesiąt procent"
+
+Never use digits (0-9), numeric symbols, or abbreviations in the conversation text. Always spell out numbers completely as words in the target language.
+
+CRITICAL: Make this conversation feel REAL and DYNAMIC with these specific patterns:
+
+INTERRUPTION PATTERNS:
+- Use "—" (em dash) to show mid-sentence interruptions: "So I was thinking we could—" / "—test our new timing features?"
+- Show speakers cutting each other off naturally
+- Include overlapping thoughts and competing to speak
+
+EMOTIONAL REACTIONS:
+- Frequent emotional annotations: [laughs], [chuckles], [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed]
+- Show genuine reactions to what the other person says
+- Include moments of realization, surprise, disagreement
+
+CONVERSATIONAL FLOW:
+- Speakers should interrupt, agree enthusiastically, or disagree
+- Include side tangents and references to other topics
+- Show speakers building on each other's ideas or challenging them
+- Use casual language, contractions, and natural speech patterns
+- Include filler words and natural hesitations occasionally
+
+DYNAMIC EXCHANGES:
+- Mix very short responses ("Wait, what?", "Exactly!", "Oh my god!") with longer explanations
+- Show speakers getting excited and talking over each other
+- Include moments where they both try to talk at the same time
+- Reference shared knowledge or experiences they might have
+
+EXAMPLE PERSONALITY INTERACTIONS:
+- Speaker1: "Oh my god, this is incredible! So you're telling me—"
+- Speaker2: "—[sighs] Obviously you missed the part where it says this barely works in practice."
+- Speaker1: "Wait, but couldn't this change everything?!"
+- Speaker2: "Sure, if you ignore all the obvious problems it creates. [eye roll]"
+- Speaker1: "I'm so excited about this! What do you think?"
+- Speaker2: "I think you're getting way too worked up over something that's been tried before and failed."
+
+Make Speaker1 genuinely enthusiastic and sometimes adorably clueless, while Speaker2 is constantly deflating their excitement with cold realism and superiority. 
+
+GRAMMATICAL ACCURACY - CRITICAL FOR GENDER-INFLECTED LANGUAGES:
+- Speaker1 (MALE) must use MASCULINE grammatical forms in languages with gender inflection (Polish, Russian, Spanish, French, German, etc.)
+- Speaker2 (FEMALE) must use FEMININE grammatical forms in languages with gender inflection
+- For POLISH specifically:
+  * Speaker1 (male): "byłem", "zrobiłem", "pomyślałem", "widziałem", "rozumiem", "powiedziałem", "dowiedziałem się"
+  * Speaker2 (female): "byłam", "zrobiłam", "pomyślałam", "widziałam", "rozumiem", "powiedziałam", "dowiedziałam się"
+  * Use proper masculine/feminine verb endings in past tense and other gender-agreeing forms
+- For other gender-inflected languages: Apply the same principle - use correct masculine forms for Speaker1 and feminine forms for Speaker2
+- This includes verb conjugations, past participles, adjectives, and all grammatical elements that must agree with the speaker's gender
+- In English: Gender agreement is less strict, but maintain natural gender-appropriate language
+
+SYNTAX AND GRAMMATICAL CORRECTNESS:
+- CRITICAL: All sentences must use correct grammar and syntax for the target language
+- Avoid grammatical errors, incorrect word forms, or awkward phrasing
+- For POLISH: Pay special attention to:
+  * Correct case endings (mianownik, dopełniacz, celownik, biernik, narzędnik, miejscownik, wołacz)
+  * Proper verb forms and conjugations
+  * Correct noun-adjective agreement
+  * Proper use of prepositions with correct cases
+  * Examples of CORRECT Polish: "polewanie zimną wodą", "działanie pod presją", "reakcja na stres"
+  * Examples of INCORRECT to avoid: "lanie pod zimną wodę" (should be "polewanie zimną wodą"), "działanie pod presje" (should be "działanie pod presją")
+- Use natural, idiomatic expressions that sound natural to native speakers
+- Double-check that all noun phrases, verb phrases, and sentence structures follow the rules of the target language
+- If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`,
+
+  polishEndingPrompt: `CRITICAL - ENDING FOR POLISH PODCASTS:
+At the very end of the conversation, one of the speakers (either Speaker1 or Speaker2) MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
+- Speaker1: "A pamiętajcie, darmowy PDF z naszego podcastu można pobrać w linku pod filmem!"
+- Speaker2: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
+- Speaker1: "I jeszcze jedna rzecz - darmowy PDF z naszego podcastu znajdziecie w linku pod filmem!"
+The statement should feel natural and conversational, using the speaker's dialect (Silesian for Speaker1, Goral for Speaker2). Always include this ending for Polish podcasts.`,
+
+  hostPersonalitiesPromptPolish: `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- CRITICAL: Use MASCULINE grammatical forms in Polish
+  * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
+  * Use masculine verb endings and adjectives that agree with the male speaker
+- DIALECT: Speaker1 should use SILESIAN dialect (śląski)
+  * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
+  * Silesian grammatical features: "idymy" instead of "idziemy", "robimy" stays similar, but with Silesian intonation patterns
+  * Natural Silesian expressions and word order
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+- Tends to see the bright side of everything
+- Sometimes misses subtleties or nuances
+- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- CRITICAL: Use FEMININE grammatical forms in Polish
+  * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
+  * Use feminine verb endings and adjectives that agree with the female speaker
+- DIALECT: Speaker2 should use GORAL (Highland) dialect (góralski)
+  * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
+  * Goral grammatical features: "som" instead of "są", "robia" instead of "robią", typical Goral intonation
+  * Natural Goral expressions and word order with characteristic melodic patterns
+- Knows everything (or thinks they do)
+- Often corrects or challenges Speaker1
+- Uses condescending language and sighs frequently
+- Points out flaws, problems, and downsides
+- Makes sarcastic comments and eye-rolls
+- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`,
+
+  hostPersonalitiesPromptOther: `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- CRITICAL: Use MASCULINE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate masculine grammatical forms, verb endings and adjectives that agree with the male speaker
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+- Tends to see the bright side of everything
+- Sometimes misses subtleties or nuances
+- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- CRITICAL: Use FEMININE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate feminine grammatical forms, verb endings and adjectives that agree with the female speaker
+- Knows everything (or thinks they do)
+- Often corrects or challenges Speaker1
+- Uses condescending language and sighs frequently
+- Points out flaws, problems, and downsides
+- Makes sarcastic comments and eye-rolls
+- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`
+});
 
 const loadHistory = (): HistoryItem[] => {
   if (typeof window === 'undefined') return [];
@@ -120,6 +273,14 @@ export default function Home() {
   const [showArchive, setShowArchive] = useState(false);
   const [archivedFiles, setArchivedFiles] = useState<Array<{ name: string; size: number; createdAt: string; modifiedAt: string }>>([]);
   const [localHistory, setLocalHistory] = useState<HistoryItem[]>([]);
+  
+  // Prompts state
+  const defaultPrompts = getDefaultPrompts();
+  const [mainPrompt, setMainPrompt] = useState<string>(savedSettings.mainPrompt || defaultPrompts.mainPrompt);
+  const [polishEndingPrompt, setPolishEndingPrompt] = useState<string>(savedSettings.polishEndingPrompt || defaultPrompts.polishEndingPrompt);
+  const [hostPersonalitiesPromptPolish, setHostPersonalitiesPromptPolish] = useState<string>(savedSettings.hostPersonalitiesPromptPolish || defaultPrompts.hostPersonalitiesPromptPolish);
+  const [hostPersonalitiesPromptOther, setHostPersonalitiesPromptOther] = useState<string>(savedSettings.hostPersonalitiesPromptOther || defaultPrompts.hostPersonalitiesPromptOther);
+  const [showPromptSettings, setShowPromptSettings] = useState(false);
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -136,8 +297,12 @@ export default function Home() {
       autoGenerateAudio,
       url,
       useTranscript,
+      mainPrompt,
+      polishEndingPrompt,
+      hostPersonalitiesPromptPolish,
+      hostPersonalitiesPromptOther,
     });
-  }, [language, selectedVoice1, selectedVoice2, autoGenerateAudio, url, useTranscript]);
+  }, [language, selectedVoice1, selectedVoice2, autoGenerateAudio, url, useTranscript, mainPrompt, polishEndingPrompt, hostPersonalitiesPromptPolish, hostPersonalitiesPromptOther]);
 
   // Fetch available voices on component mount
   useEffect(() => {
@@ -241,7 +406,11 @@ export default function Home() {
         body: JSON.stringify({
           content: content,
           title: title,
-          language: language
+          language: language,
+          mainPrompt,
+          polishEndingPrompt,
+          hostPersonalitiesPromptPolish,
+          hostPersonalitiesPromptOther,
         }),
       });
 
@@ -985,6 +1154,127 @@ export default function Home() {
                 {availableVoices.filter(v => v.id).map((v, idx) => <option key={`voice2-${v.id || idx}`} value={v.id}>{v.name} {v.category ? `(${v.category})` : ''}</option>)}
               </select>
             </div>
+          </div>
+
+          {/* Prompt Settings */}
+          <div className="slab">
+            <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 className="monolith-title">Prompts</h3>
+              <button 
+                onClick={() => setShowPromptSettings(!showPromptSettings)}
+                style={{ background: 'transparent', border: '1px solid #333', borderRadius: '4px', color: '#888', fontSize: '10px', padding: '4px 10px', cursor: 'pointer' }}
+              >
+                {showPromptSettings ? 'Hide' : 'Show'}
+              </button>
+            </div>
+
+            {showPromptSettings && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Main Prompt:</label>
+                  <textarea
+                    value={mainPrompt}
+                    onChange={(e) => setMainPrompt(e.target.value)}
+                    style={{
+                      width: '100%',
+                      minHeight: '200px',
+                      padding: '12px',
+                      background: '#1a1a1a',
+                      border: '1px solid #333',
+                      borderRadius: '8px',
+                      color: '#fff',
+                      fontSize: '11px',
+                      fontFamily: 'monospace',
+                      resize: 'vertical',
+                    }}
+                  />
+                  <button
+                    onClick={() => setMainPrompt(defaultPrompts.mainPrompt)}
+                    style={{ marginTop: '6px', background: 'transparent', border: '1px solid #444', borderRadius: '4px', color: '#888', fontSize: '10px', padding: '4px 8px', cursor: 'pointer' }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Polish Ending Prompt:</label>
+                  <textarea
+                    value={polishEndingPrompt}
+                    onChange={(e) => setPolishEndingPrompt(e.target.value)}
+                    style={{
+                      width: '100%',
+                      minHeight: '120px',
+                      padding: '12px',
+                      background: '#1a1a1a',
+                      border: '1px solid #333',
+                      borderRadius: '8px',
+                      color: '#fff',
+                      fontSize: '11px',
+                      fontFamily: 'monospace',
+                      resize: 'vertical',
+                    }}
+                  />
+                  <button
+                    onClick={() => setPolishEndingPrompt(defaultPrompts.polishEndingPrompt)}
+                    style={{ marginTop: '6px', background: 'transparent', border: '1px solid #444', borderRadius: '4px', color: '#888', fontSize: '10px', padding: '4px 8px', cursor: 'pointer' }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Host Personalities (Polish):</label>
+                  <textarea
+                    value={hostPersonalitiesPromptPolish}
+                    onChange={(e) => setHostPersonalitiesPromptPolish(e.target.value)}
+                    style={{
+                      width: '100%',
+                      minHeight: '200px',
+                      padding: '12px',
+                      background: '#1a1a1a',
+                      border: '1px solid #333',
+                      borderRadius: '8px',
+                      color: '#fff',
+                      fontSize: '11px',
+                      fontFamily: 'monospace',
+                      resize: 'vertical',
+                    }}
+                  />
+                  <button
+                    onClick={() => setHostPersonalitiesPromptPolish(defaultPrompts.hostPersonalitiesPromptPolish)}
+                    style={{ marginTop: '6px', background: 'transparent', border: '1px solid #444', borderRadius: '4px', color: '#888', fontSize: '10px', padding: '4px 8px', cursor: 'pointer' }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Host Personalities (Other Languages):</label>
+                  <textarea
+                    value={hostPersonalitiesPromptOther}
+                    onChange={(e) => setHostPersonalitiesPromptOther(e.target.value)}
+                    style={{
+                      width: '100%',
+                      minHeight: '200px',
+                      padding: '12px',
+                      background: '#1a1a1a',
+                      border: '1px solid #333',
+                      borderRadius: '8px',
+                      color: '#fff',
+                      fontSize: '11px',
+                      fontFamily: 'monospace',
+                      resize: 'vertical',
+                    }}
+                  />
+                  <button
+                    onClick={() => setHostPersonalitiesPromptOther(defaultPrompts.hostPersonalitiesPromptOther)}
+                    style={{ marginTop: '6px', background: 'transparent', border: '1px solid #444', borderRadius: '4px', color: '#888', fontSize: '10px', padding: '4px 8px', cursor: 'pointer' }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Archive Link (Mini) */}
