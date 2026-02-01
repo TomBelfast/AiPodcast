@@ -189,6 +189,8 @@ Antoni (Male - Energetic & Naive):
 - CRITICAL: Use MASCULINE grammatical forms in Polish
   * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
   * Use masculine verb endings and adjectives that agree with the male speaker
+- ADDRESSING MARIA: When speaking to Maria, ALWAYS use FEMININE forms
+  * Examples: "słyszałaś", "widziałaś", "zrobiłabyś", "mogłabyś"
 - DIALECT: Antoni should use SILESIAN dialect (śląski)
   * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
   * Silesian grammatical features: "idymy" instead of "idziemy", "robimy" stays similar, but with Silesian intonation patterns
@@ -205,6 +207,8 @@ Maria (Female - Pessimistic & Arrogant):
 - CRITICAL: Use FEMININE grammatical forms in Polish
   * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
   * Use feminine verb endings and adjectives that agree with the female speaker
+- ADDRESSING ANTONI: When speaking to Antoni, ALWAYS use MASCULINE forms
+  * Examples: "słyszałeś", "widziałeś", "zrobiłbyś", "mógłbyś", "zauważyłeś"
 - DIALECT: Maria should use GORAL (Highland) dialect (góralski)
   * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
   * Goral grammatical features: "som" instead of "są", "robia" instead of "robią", typical Goral intonation
