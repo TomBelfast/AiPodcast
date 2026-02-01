@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
     // Convert conversation to dialogue inputs
     const dialogueInputs = conversation.map((item: { speaker: string; text: string }) => ({
       text: item.text,
-      voiceId: item.speaker === 'Speaker1' ? voice1Id : voice2Id,
+      voiceId: (item.speaker === 'Speaker1' || item.speaker === 'Antoni') ? voice1Id : voice2Id,
     }));
 
     // Generate audio
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Return download URL (prefer MinIO if available, otherwise local)
-    const downloadUrl = minioUrl || 
+    const downloadUrl = minioUrl ||
       `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/webhook/download/${jobId}`;
 
     return NextResponse.json({
@@ -115,7 +115,7 @@ async function uploadToMinIOStorage(
     // Dynamic import to avoid loading MinIO if not needed
     const minioModule = await import('minio');
     const MinIO = (minioModule as any).default || minioModule;
-    
+
     // Check if MinIO is configured
     if (!process.env.MINIO_ACCESS_KEY || !process.env.MINIO_SECRET_KEY) {
       return {
@@ -152,7 +152,7 @@ async function uploadToMinIOStorage(
     });
 
     const bucketName = process.env.MINIO_BUCKET_NAME || 'podcast';
-    
+
     // Ensure bucket exists
     const bucketExists = await minioClient.bucketExists(bucketName);
     if (!bucketExists) {
@@ -198,7 +198,7 @@ async function uploadToMinIOStorage(
       // Try to get bucket policy to check if it's public
       const policy = await minioClient.getBucketPolicy(bucketName);
       const policyObj = JSON.parse(policy);
-      const isPublic = policyObj.Statement?.some((stmt: any) => 
+      const isPublic = policyObj.Statement?.some((stmt: any) =>
         stmt.Effect === 'Allow' && stmt.Principal?.AWS?.includes('*')
       );
 

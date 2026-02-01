@@ -7,7 +7,7 @@ const podcastSchema = z.object({
   conversation: z
     .array(
       z.object({
-        speaker: z.enum(["Speaker1", "Speaker2"]),
+        speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Maria"]),
         text: z
           .string()
           .describe(
@@ -22,9 +22,9 @@ const podcastSchema = z.object({
 
 export async function POST(req: NextRequest) {
   try {
-    const { 
-      content, 
-      title, 
+    const {
+      content,
+      title,
       language = 'en',
       mainPrompt,
       polishEndingPrompt,
@@ -43,17 +43,17 @@ export async function POST(req: NextRequest) {
     const openRouterApiKey = process.env.OPENROUTER_API_KEY;
     const openaiApiKey = process.env.OPENAI_API_KEY;
     const useOpenRouter = !!openRouterApiKey;
-    
+
     if (!openRouterApiKey && !openaiApiKey) {
       return NextResponse.json(
         { error: "Either OPENROUTER_API_KEY or OPENAI_API_KEY must be configured" },
         { status: 500 }
       );
     }
-    
+
     let openaiClient;
     const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
-    
+
     if (useOpenRouter) {
       // Configure OpenRouter (compatible with OpenAI API)
       openaiClient = createOpenAI({
@@ -66,13 +66,13 @@ export async function POST(req: NextRequest) {
         apiKey: openaiApiKey,
       });
     }
-    
+
     // Use a model available on OpenRouter (or OpenAI if not using OpenRouter)
     // OpenRouter format: openai/gpt-4o-mini, anthropic/claude-3.5-sonnet, etc.
-    const modelName = useOpenRouter 
+    const modelName = useOpenRouter
       ? (process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini')
       : 'gpt-4o-mini';
-    
+
     const model = openaiClient(modelName);
 
     // Determine language name
@@ -177,19 +177,19 @@ SYNTAX AND GRAMMATICAL CORRECTNESS:
 - If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`;
 
     const defaultPolishEndingPrompt = `CRITICAL - ENDING FOR POLISH PODCASTS:
-At the very end of the conversation, one of the speakers (either Speaker1 or Speaker2) MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
-- Speaker1: "A pamiętajcie, darmowy PDF z naszego podcastu można pobrać w linku pod filmem!"
-- Speaker2: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
-- Speaker1: "I jeszcze jedna rzecz - darmowy PDF z naszego podcastu znajdziecie w linku pod filmem!"
-The statement should feel natural and conversational, using the speaker's dialect (Silesian for Speaker1, Goral for Speaker2). Always include this ending for Polish podcasts.`;
+At the very end of the conversation, either Antoni or Maria MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
+- Antoni: "A pamiętajcie, darmowy PDF z naszego podcastu można pobrać w linku pod filmem!"
+- Maria: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
+- Antoni: "I jeszcze jedna rzecz - darmowy PDF z naszego podcastu znajdziecie w linku pod filmem!"
+The statement should feel natural and conversational, using the speaker's dialect (Silesian for Antoni, Goral for Maria). Always include this ending for Polish podcasts.`;
 
     const defaultHostPersonalitiesPolish = `HOST PERSONALITIES:
-Speaker1 (Male - Energetic & Naive):
+Antoni (Male - Energetic & Naive):
 - MALE speaker with an extremely enthusiastic and optimistic personality
 - CRITICAL: Use MASCULINE grammatical forms in Polish
   * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
   * Use masculine verb endings and adjectives that agree with the male speaker
-- DIALECT: Speaker1 should use SILESIAN dialect (śląski)
+- DIALECT: Antoni should use SILESIAN dialect (śląski)
   * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
   * Silesian grammatical features: "idymy" instead of "idziemy", "robimy" stays similar, but with Silesian intonation patterns
   * Natural Silesian expressions and word order
@@ -200,17 +200,17 @@ Speaker1 (Male - Energetic & Naive):
 - Sometimes misses subtleties or nuances
 - Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
 
-Speaker2 (Female - Pessimistic & Arrogant):
+Maria (Female - Pessimistic & Arrogant):
 - FEMALE speaker who is skeptical and cynical about most claims
 - CRITICAL: Use FEMININE grammatical forms in Polish
   * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
   * Use feminine verb endings and adjectives that agree with the female speaker
-- DIALECT: Speaker2 should use GORAL (Highland) dialect (góralski)
+- DIALECT: Maria should use GORAL (Highland) dialect (góralski)
   * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
   * Goral grammatical features: "som" instead of "są", "robia" instead of "robią", typical Goral intonation
   * Natural Goral expressions and word order with characteristic melodic patterns
 - Knows everything (or thinks they do)
-- Often corrects or challenges Speaker1
+- Often corrects or challenges Antoni
 - Uses condescending language and sighs frequently
 - Points out flaws, problems, and downsides
 - Makes sarcastic comments and eye-rolls
@@ -242,7 +242,7 @@ Speaker2 (Female - Pessimistic & Arrogant):
     // Use prompts from request or fallback to defaults
     const usedMainPrompt = mainPrompt || defaultMainPrompt;
     const usedPolishEndingPrompt = polishEndingPrompt || defaultPolishEndingPrompt;
-    
+
     // Build host personalities section - use provided prompts or defaults
     let hostPersonalitiesSection = '';
     if (isPolish) {
@@ -275,11 +275,11 @@ IMPORTANT: Keep the TOTAL conversation under 2500 characters to fit within API l
       });
     } catch (apiError: any) {
       console.error("API error:", apiError);
-      
+
       // Check for specific error types
       let errorMessage = 'Failed to generate podcast conversation';
       const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
-      
+
       if (apiError?.cause?.error?.code === 'insufficient_quota') {
         errorMessage = `${provider} API quota exceeded. Please check your billing and plan details.`;
       } else if (apiError?.cause?.error?.code === 'invalid_api_key') {
@@ -293,9 +293,9 @@ IMPORTANT: Keep the TOTAL conversation under 2500 characters to fit within API l
       // Return error as stream
       const errorStream = new ReadableStream({
         start(controller) {
-          const errorChunk = JSON.stringify({ 
+          const errorChunk = JSON.stringify({
             type: 'error',
-            error: errorMessage 
+            error: errorMessage
           }) + '\n';
           controller.enqueue(new TextEncoder().encode(errorChunk));
           controller.close();
@@ -316,29 +316,29 @@ IMPORTANT: Keep the TOTAL conversation under 2500 characters to fit within API l
         try {
           for await (const partialObject of result.partialObjectStream) {
             // Send each partial update as JSON
-            const chunk = JSON.stringify({ 
+            const chunk = JSON.stringify({
               type: 'partial',
-              data: partialObject 
+              data: partialObject
             }) + '\n';
-            
+
             controller.enqueue(new TextEncoder().encode(chunk));
           }
 
           // Send final complete object
           const finalObject = await result.object;
-          const finalChunk = JSON.stringify({ 
+          const finalChunk = JSON.stringify({
             type: 'complete',
-            data: finalObject 
+            data: finalObject
           }) + '\n';
-          
+
           controller.enqueue(new TextEncoder().encode(finalChunk));
           controller.close();
         } catch (error: any) {
           console.error("Streaming error:", error);
-          
+
           let errorMessage = 'Failed to generate podcast conversation';
           const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
-          
+
           // Check for specific error types
           if (error?.cause?.error?.code === 'insufficient_quota') {
             errorMessage = `${provider} API quota exceeded. Please check your billing and plan details.`;
@@ -349,12 +349,12 @@ IMPORTANT: Keep the TOTAL conversation under 2500 characters to fit within API l
           } else if (error?.message) {
             errorMessage = `Error: ${error.message}`;
           }
-          
-          const errorChunk = JSON.stringify({ 
+
+          const errorChunk = JSON.stringify({
             type: 'error',
-            error: errorMessage 
+            error: errorMessage
           }) + '\n';
-          
+
           controller.enqueue(new TextEncoder().encode(errorChunk));
           controller.close();
         }

@@ -91,7 +91,7 @@ export async function POST(req: NextRequest) {
 
         const dialogueInputs = conversation.map((item: { speaker: string; text: string }) => ({
             text: item.text,
-            voiceId: item.speaker === 'Speaker1' ? voice1Id : voice2Id,
+            voiceId: (item.speaker === 'Speaker1' || item.speaker === 'Antoni') ? voice1Id : voice2Id,
         }));
 
         const result = await createDialogue({ inputs: dialogueInputs });
