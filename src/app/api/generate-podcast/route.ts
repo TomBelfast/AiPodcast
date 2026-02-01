@@ -7,7 +7,7 @@ const podcastSchema = z.object({
   conversation: z
     .array(
       z.object({
-        speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Maria"]),
+        speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Zofia"]),
         text: z
           .string()
           .describe(
@@ -177,11 +177,11 @@ SYNTAX AND GRAMMATICAL CORRECTNESS:
 - If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`;
 
     const defaultPolishEndingPrompt = `CRITICAL - ENDING FOR POLISH PODCASTS:
-At the very end of the conversation, either Antoni or Maria MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
+At the very end of the conversation, either Antoni or Zofia MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
 - Antoni: "A pamiętajcie, darmowy PDF z naszego podcastu można pobrać w linku pod filmem!"
-- Maria: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
+- Zofia: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
 - Antoni: "I jeszcze jedna rzecz - darmowy PDF z naszego podcastu znajdziecie w linku pod filmem!"
-The statement should feel natural and conversational, using the speaker's dialect (Silesian for Antoni, Goral for Maria). Always include this ending for Polish podcasts.`;
+The statement should feel natural and conversational, using the speaker's dialect (Silesian for Antoni, Goral for Zofia). Always include this ending for Polish podcasts.`;
 
     const defaultHostPersonalitiesPolish = `HOST PERSONALITIES:
 Antoni (Male - Energetic & Naive):
@@ -189,7 +189,7 @@ Antoni (Male - Energetic & Naive):
 - CRITICAL: Use MASCULINE grammatical forms in Polish
   * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
   * Use masculine verb endings and adjectives that agree with the male speaker
-- ADDRESSING MARIA: When speaking to Maria, ALWAYS use FEMININE forms
+- ADDRESSING ZOFIA: When speaking to Zofia, ALWAYS use FEMININE forms
   * Examples: "słyszałaś", "widziałaś", "zrobiłabyś", "mogłabyś"
 - DIALECT: Antoni should use SILESIAN dialect (śląski)
   * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
@@ -202,14 +202,14 @@ Antoni (Male - Energetic & Naive):
 - Sometimes misses subtleties or nuances
 - Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
 
-Maria (Female - Pessimistic & Arrogant):
+Zofia (Female - Pessimistic & Arrogant):
 - FEMALE speaker who is skeptical and cynical about most claims
 - CRITICAL: Use FEMININE grammatical forms in Polish
   * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
   * Use feminine verb endings and adjectives that agree with the female speaker
 - ADDRESSING ANTONI: When speaking to Antoni, ALWAYS use MASCULINE forms
   * Examples: "słyszałeś", "widziałeś", "zrobiłbyś", "mógłbyś", "zauważyłeś"
-- DIALECT: Maria should use GORAL (Highland) dialect (góralski)
+- DIALECT: Zofia should use GORAL (Highland) dialect (góralski)
   * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
   * Goral grammatical features: "som" instead of "są", "robia" instead of "robią", typical Goral intonation
   * Natural Goral expressions and word order with characteristic melodic patterns
