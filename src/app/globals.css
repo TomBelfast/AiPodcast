@@ -1,6 +1,4 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 :root {
   --background: #050505;
@@ -73,35 +71,47 @@ body::before {
 }
 
 /* Layout */
+/* Layout */
 .monolith-container {
   display: flex;
   flex-direction: column;
-  padding: 24px;
-  max-width: 1800px;
+  padding: 16px;
+  width: 100%;
+  max-width: 1920px;
   margin: 0 auto;
   min-height: 100vh;
   font-family: var(--font-inter), sans-serif;
-  gap: 24px;
+  gap: 20px;
+  overflow-x: hidden;
+}
+
+@media (min-width: 768px) {
+  .monolith-container {
+    padding: 24px;
+    gap: 24px;
+  }
 }
 
 .monolith-grid {
   display: grid;
-  grid-template-columns: 350px 1fr 350px;
-  gap: 24px;
+  grid-template-columns: 1fr;
+  gap: 20px;
   align-items: start;
+  width: 100%;
 }
 
-@media (max-width: 1400px) {
+@media (min-width: 1024px) {
   .monolith-grid {
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 300px 1fr;
   }
 }
 
-@media (max-width: 1024px) {
+@media (min-width: 1600px) {
   .monolith-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: 350px 1fr 350px;
   }
 }
+
 
 /* Card Style (Slab) */
 .slab {
@@ -145,32 +155,39 @@ body::before {
   0% {
     background-position: 0% 0%;
   }
+
   25% {
     background-position: 100% 0%;
   }
+
   50% {
     background-position: 100% 100%;
   }
+
   75% {
     background-position: 0% 100%;
   }
+
   100% {
     background-position: 0% 0%;
   }
 }
 
 @keyframes border-pulse {
-  0%, 100% {
+
+  0%,
+  100% {
     opacity: 0.6;
-    box-shadow: 
+    box-shadow:
       0 0 15px rgba(37, 211, 102, 0.4),
       0 0 30px rgba(37, 211, 102, 0.2),
       20px 20px 60px rgba(0, 0, 0, 0.6),
       -20px -20px 60px rgba(255, 255, 255, 0.01);
   }
+
   50% {
     opacity: 1;
-    box-shadow: 
+    box-shadow:
       0 0 25px rgba(37, 211, 102, 0.6),
       0 0 50px rgba(37, 211, 102, 0.3),
       20px 20px 60px rgba(0, 0, 0, 0.6),
@@ -194,12 +211,11 @@ body::before {
   right: -2px;
   bottom: -2px;
   border-radius: 24px;
-  background: linear-gradient(45deg, 
-    rgba(37, 211, 102, 0.8),
-    rgba(37, 211, 102, 0.4),
-    rgba(37, 211, 102, 0.8),
-    rgba(37, 211, 102, 0.4)
-  );
+  background: linear-gradient(45deg,
+      rgba(37, 211, 102, 0.8),
+      rgba(37, 211, 102, 0.4),
+      rgba(37, 211, 102, 0.8),
+      rgba(37, 211, 102, 0.4));
   background-size: 400% 400%;
   animation: border-rotate 3s linear infinite;
   z-index: -1;
@@ -208,7 +224,7 @@ body::before {
 
 .slab.audio-ready {
   border: 2px solid rgba(37, 211, 102, 0.8);
-  box-shadow: 
+  box-shadow:
     0 0 30px rgba(37, 211, 102, 0.5),
     0 0 60px rgba(37, 211, 102, 0.2),
     20px 20px 60px rgba(0, 0, 0, 0.6),
