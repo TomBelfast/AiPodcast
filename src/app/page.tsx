@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DialogueInput } from '@/types';
+import { UserSettingsModal } from '@/components/settings/UserSettingsModal';
+import { supabase } from '@/lib/supabase';
 
 // LocalStorage helpers
 const STORAGE_KEYS = {
@@ -242,7 +244,7 @@ const addToHistory = (item: HistoryItem) => {
 export default function Home() {
   // Load settings from localStorage
   const savedSettings = loadSettings();
-  
+
   // Default URL per request
   const [url, setUrl] = useState(savedSettings.url || 'https://openai.com/index/introducing-gpt-5/');
   const [language, setLanguage] = useState(savedSettings.language || 'en');
@@ -273,7 +275,7 @@ export default function Home() {
   const [showArchive, setShowArchive] = useState(false);
   const [archivedFiles, setArchivedFiles] = useState<Array<{ name: string; size: number; createdAt: string; modifiedAt: string }>>([]);
   const [localHistory, setLocalHistory] = useState<HistoryItem[]>([]);
-  
+
   // Prompts state
   const defaultPrompts = getDefaultPrompts();
   const [mainPrompt, setMainPrompt] = useState<string>(savedSettings.mainPrompt || defaultPrompts.mainPrompt);
@@ -281,11 +283,52 @@ export default function Home() {
   const [hostPersonalitiesPromptPolish, setHostPersonalitiesPromptPolish] = useState<string>(savedSettings.hostPersonalitiesPromptPolish || defaultPrompts.hostPersonalitiesPromptPolish);
   const [hostPersonalitiesPromptOther, setHostPersonalitiesPromptOther] = useState<string>(savedSettings.hostPersonalitiesPromptOther || defaultPrompts.hostPersonalitiesPromptOther);
   const [showPromptSettings, setShowPromptSettings] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [userSettings, setUserSettings] = useState<any>({});
+  const [openaiApiKey, setOpenaiApiKey] = useState<string | undefined>(undefined);
+  const [elevenlabsApiKey, setElevenlabsApiKey] = useState<string | undefined>(undefined);
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
 
   // Load history from localStorage on mount
   useEffect(() => {
     const history = loadHistory();
     setLocalHistory(history);
+
+    // Fetch user settings from Supabase
+    const fetchUserSettings = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        const { data, error } = await supabase
+          .from('user_settings')
+          .select('*')
+          .eq('user_id', session.user.id)
+          .maybeSingle();
+
+        if (data) {
+          setUserSettings(data);
+          setOpenaiApiKey(data.openai_api_key);
+          setElevenlabsApiKey(data.elevenlabs_api_key);
+          if (data.main_prompt) setMainPrompt(data.main_prompt);
+          if (data.polish_ending_prompt) setPolishEndingPrompt(data.polish_ending_prompt);
+          if (data.host_prompt_polish) setHostPersonalitiesPromptPolish(data.host_prompt_polish);
+          if (data.host_prompt_other) setHostPersonalitiesPromptOther(data.host_prompt_other);
+
+          // Auto-open modal if keys are missing
+          if (!data.openai_api_key || !data.elevenlabs_api_key) {
+            setSettingsMessage('INITIALIZATION REQUIRED: PLEASE CONFIGURE API KEYS');
+            setShowSettingsModal(true);
+          }
+        } else {
+          // No settings found (new user)
+          const isAdmin = session.user.email === 'tomaszpasiekauk@gmail.com';
+          if (!isAdmin) {
+            setSettingsMessage('WELCOME USER: INITIAL CONFIGURATION REQUIRED');
+            setShowSettingsModal(true);
+          }
+        }
+      }
+    };
+    fetchUserSettings();
   }, []);
 
   // Save settings to localStorage when they change
@@ -397,11 +440,15 @@ export default function Home() {
         title = scrapeData.title;
       }
 
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
       // Step 2: Generate podcast conversation with streaming
       const podcastResponse = await fetch('/api/generate-podcast', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
           content: content,
@@ -411,11 +458,23 @@ export default function Home() {
           polishEndingPrompt,
           hostPersonalitiesPromptPolish,
           hostPersonalitiesPromptOther,
+          openaiApiKey,
         }),
       });
 
       if (!podcastResponse.ok) {
         const errorData = await podcastResponse.json();
+
+        if (errorData.code === 'MISSING_OPENAI_KEY') {
+          // Open settings modal
+          setShowSettingsModal(true);
+          // We can't easily pass the message to the modal without refactoring, 
+          // so for now we'll throw the error and let the catch block handle it (which alerts).
+          // But to be more "popup" friendly as requested:
+          setSettingsMessage('MISSING NEURAL MATRIX KEY: OpenAI API Key required.');
+          throw new Error('Please configure your OpenAI API Key in Settings.');
+        }
+
         throw new Error(errorData.error || 'Failed to generate podcast');
       }
 
@@ -484,16 +543,32 @@ export default function Home() {
         voiceId: item.speaker === 'Speaker1' ? voices[0].id : voices[1].id
       }));
 
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token;
+
       const audioResponse = await fetch('/api/text-to-speech', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ inputs: dialogueInputs }),
+        body: JSON.stringify({
+          inputs: dialogueInputs,
+          apiKey: elevenlabsApiKey
+        }),
       });
 
       if (!audioResponse.ok) {
         const errorData = await audioResponse.json();
+
+        // Handle missing key error
+        if (errorData.code === 'MISSING_ELEVENLABS_KEY') {
+          setSettingsMessage('MISSING NEURAL MATRIX KEY: ElevenLabs API Key required.');
+          setShowSettingsModal(true);
+          // Highlighting logic could be added here or inside modal via a prop
+          throw new Error('Please configure your ElevenLabs API Key in Settings.');
+        }
+
         throw new Error(errorData.error || 'Failed to generate audio');
       }
 
@@ -706,6 +781,12 @@ export default function Home() {
     }
   }, [conversationTurns]);
 
+  // Logout function
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    window.location.reload();
+  };
+
   // Simple SVG avatar for each speaker (gradient + initial)
   const Avatar = ({ name, tone }: { name: string; tone: 'left' | 'right' }) => {
     const initial = (name || '?').slice(0, 1).toUpperCase();
@@ -806,11 +887,11 @@ export default function Home() {
       const title = scrapedContent?.title || customTitle || 'Untitled Podcast';
       const timestamp = Date.now();
       const filename = `${title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}_${timestamp}.mp3`;
-      
+
       // Calculate approximate size (base64 is ~33% larger than binary)
       const base64Data = audioUrl.includes(',') ? audioUrl.split(',')[1] : audioUrl;
       const sizeBytes = (base64Data.length * 3) / 4;
-      
+
       // Save to localStorage
       const historyItem: HistoryItem = {
         id: `local_${timestamp}`,
@@ -824,7 +905,7 @@ export default function Home() {
       };
       addToHistory(historyItem);
       setLocalHistory(loadHistory());
-      
+
       // Also try to save to server
       try {
         const response = await fetch('/api/archive', {
@@ -864,7 +945,7 @@ export default function Home() {
     } catch (error) {
       console.error('Error loading archived files from server:', error);
     }
-    
+
     // Also load from localStorage
     const localHistory = loadHistory();
     setLocalHistory(localHistory);
@@ -880,14 +961,30 @@ export default function Home() {
   return (
     <div className="monolith-container">
       {/* Top Header */}
-      <h1 className="text-3xl font-bold bg-gradient-to-r from-white to-gray-500 bg-clip-text text-transparent tracking-tight">
-        AI Podcast Generator
-      </h1>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-3xl font-bold bg-gradient-to-r from-white to-gray-300 bg-clip-text text-transparent tracking-tight">
+          AI Podcast Generator
+        </h1>
+        <div className="flex gap-4">
+          <button
+            onClick={() => setShowSettingsModal(true)}
+            className="monolith-header-btn"
+          >
+            Settings
+          </button>
+          <button
+            onClick={handleLogout}
+            className="monolith-header-btn"
+          >
+            Logout
+          </button>
+        </div>
+      </div>
 
       {/* Status Bar */}
       <div className="status-bar">
         <div style={{ display: 'flex', gap: '40px', alignItems: 'center', width: '100%' }}>
-          <div style={{ marginRight: 'auto', fontSize: '14px', color: '#888', fontWeight: 500, letterSpacing: '0.01em', lineHeight: '1.5' }}>
+          <div style={{ marginRight: 'auto', fontSize: '14px', color: '#e4e4e7', fontWeight: 600, letterSpacing: '0.01em', lineHeight: '1.5' }}>
             Agent Status: <span style={{ color: '#fff' }}>{currentAction}</span>
           </div>
           {steps.map((step, idx) => (
@@ -896,7 +993,7 @@ export default function Home() {
               {idx + 1}. {step.label}
             </div>
           ))}
-          <div style={{ marginLeft: 'auto', fontSize: '14px', color: '#555', fontWeight: 500, letterSpacing: '0.01em', lineHeight: '1.5' }}>
+          <div style={{ marginLeft: 'auto', fontSize: '14px', color: '#d4d4d8', fontWeight: 600, letterSpacing: '0.01em', lineHeight: '1.5' }}>
             Next: {nextSteps[0] || 'Ready'}
           </div>
         </div>
@@ -1053,10 +1150,10 @@ export default function Home() {
                 value={editedConversation}
                 onChange={(e) => setEditedConversation(e.target.value)}
                 className="monolith-textarea"
-                style={{ 
-                  flex: 1, 
-                  minHeight: '400px', 
-                  fontSize: '13px', 
+                style={{
+                  flex: 1,
+                  minHeight: '400px',
+                  fontSize: '13px',
                   lineHeight: '1.6',
                   fontFamily: 'monospace',
                   resize: 'none',
@@ -1160,7 +1257,7 @@ export default function Home() {
           <div className="slab">
             <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <h3 className="monolith-title">Prompts</h3>
-              <button 
+              <button
                 onClick={() => setShowPromptSettings(!showPromptSettings)}
                 style={{ background: 'transparent', border: '1px solid #333', borderRadius: '4px', color: '#888', fontSize: '10px', padding: '4px 10px', cursor: 'pointer' }}
               >
@@ -1281,19 +1378,19 @@ export default function Home() {
           <div className="slab" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '12px', color: '#666', fontWeight: 600 }}>History</span>
-              <button 
+              <button
                 onClick={() => {
                   setShowArchive(!showArchive);
                   if (!showArchive) {
                     loadArchivedFiles();
                   }
-                }} 
+                }}
                 style={{ background: 'transparent', border: '1px solid #333', borderRadius: '4px', color: '#888', fontSize: '10px', padding: '4px 10px', cursor: 'pointer' }}
               >
                 {showArchive ? 'Hide Archive' : 'View Archive'}
               </button>
             </div>
-            
+
             {showArchive && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '400px', overflowY: 'auto', marginTop: '8px' }}>
                 {archivedFiles.length === 0 && localHistory.length === 0 ? (
@@ -1385,9 +1482,35 @@ export default function Home() {
 
       </div>
 
+      {/* Settings Modal */}
+      <UserSettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => {
+          setShowSettingsModal(false);
+          setSettingsMessage(null);
+        }}
+        initialSettings={{
+          openai_api_key: openaiApiKey,
+          elevenlabs_api_key: elevenlabsApiKey,
+          main_prompt: mainPrompt,
+          polish_ending_prompt: polishEndingPrompt,
+          host_prompt_polish: hostPersonalitiesPromptPolish,
+          host_prompt_other: hostPersonalitiesPromptOther,
+        }}
+        onSave={(newSettings) => {
+          setUserSettings(newSettings);
+          if (newSettings.openai_api_key) setOpenaiApiKey(newSettings.openai_api_key);
+          if (newSettings.elevenlabs_api_key) setElevenlabsApiKey(newSettings.elevenlabs_api_key);
+          if (newSettings.main_prompt) setMainPrompt(newSettings.main_prompt);
+          if (newSettings.polish_ending_prompt) setPolishEndingPrompt(newSettings.polish_ending_prompt);
+          if (newSettings.host_prompt_polish) setHostPersonalitiesPromptPolish(newSettings.host_prompt_polish);
+          if (newSettings.host_prompt_other) setHostPersonalitiesPromptOther(newSettings.host_prompt_other);
+          setSettingsMessage(null);
+        }}
+        initialMessage={settingsMessage}
+      />
     </div>
   );
 }
 
 function pointerButtons(c: any): 'pointer' | 'default' { return c ? 'pointer' : 'default'; }
-

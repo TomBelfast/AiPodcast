@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { streamObject } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
+import { supabase } from "@/lib/supabase";
 
 const podcastSchema = z.object({
   conversation: z
@@ -30,6 +31,7 @@ export async function POST(req: NextRequest) {
       polishEndingPrompt,
       hostPersonalitiesPromptPolish,
       hostPersonalitiesPromptOther,
+      openaiApiKey: userOpenaiApiKey, // Added: Extract key from request
     } = await req.json();
 
     if (!content) {
@@ -39,15 +41,61 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Verify user identity
+    const authHeader = req.headers.get('Authorization');
+    const token = authHeader?.split(' ')[1];
+
+    let userEmail = '';
+
+    if (token) {
+      const { data: { user }, error } = await supabase.auth.getUser(token);
+      if (!error && user?.email) {
+        userEmail = user.email;
+      }
+    }
+
+    const isAdmin = userEmail === 'tomaszpasiekauk@gmail.com';
+
+    // Access Control Logic
+    if (!isAdmin && !userOpenaiApiKey) {
+      return NextResponse.json(
+        {
+          error: "Please complete your OpenAI API Key in Settings",
+          code: "MISSING_OPENAI_KEY"
+        },
+        { status: 403 }
+      );
+    }
+
+    // Determine if using OpenRouter based on key format or admin config
+    const isOpenRouterKey = userOpenaiApiKey?.startsWith('sk-or-');
+
     // Use OpenRouter instead of OpenAI
     const openRouterApiKey = process.env.OPENROUTER_API_KEY;
-    const openaiApiKey = process.env.OPENAI_API_KEY;
-    const useOpenRouter = !!openRouterApiKey;
+    // Prioritize user key if provided, else fall back to env key (ONLY for admin)
+    const envOpenaiApiKey = isAdmin ? process.env.OPENAI_API_KEY : undefined;
 
-    if (!openRouterApiKey && !openaiApiKey) {
+    // Final key to use
+    const apiKey = userOpenaiApiKey || (isAdmin ? (process.env.OPENROUTER_API_KEY || envOpenaiApiKey) : undefined);
+
+    // Use OpenRouter if:
+    // 1. User provided a key starting with 'sk-or-'
+    // 2. OR User is admin AND no user key provided AND admin has OpenRouter env var
+    const useOpenRouter = isOpenRouterKey || (isAdmin && !userOpenaiApiKey && !!openRouterApiKey);
+
+    if (!apiKey) {
+      if (isAdmin) {
+        return NextResponse.json(
+          { error: "System API keys not configured" },
+          { status: 500 }
+        );
+      }
       return NextResponse.json(
-        { error: "Either OPENROUTER_API_KEY or OPENAI_API_KEY must be configured" },
-        { status: 500 }
+        {
+          error: "Please complete your API Key in Settings",
+          code: "MISSING_OPENAI_KEY"
+        },
+        { status: 403 }
       );
     }
 
@@ -57,13 +105,13 @@ export async function POST(req: NextRequest) {
     if (useOpenRouter) {
       // Configure OpenRouter (compatible with OpenAI API)
       openaiClient = createOpenAI({
-        apiKey: openRouterApiKey,
+        apiKey: apiKey,
         baseURL: 'https://openrouter.ai/api/v1',
       } as any);
     } else {
       // Fallback to OpenAI
       openaiClient = createOpenAI({
-        apiKey: openaiApiKey,
+        apiKey: apiKey,
       });
     }
 

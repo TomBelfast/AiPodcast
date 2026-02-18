@@ -1,17 +1,17 @@
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import { Err, Ok, Result } from '@/types';
 
-export async function getElevenLabsClient(): Promise<Result<ElevenLabsClient>> {
+export async function getElevenLabsClient(apiKey?: string): Promise<Result<ElevenLabsClient>> {
   try {
-    const apiKey = process.env.ELEVENLABS_API_KEY;
+    const finalApiKey = apiKey || process.env.ELEVENLABS_API_KEY;
 
-    if (!apiKey) {
+    if (!finalApiKey) {
       return Err(
-        'API key is missing. Please configure the ELEVENLABS_API_KEY environment variable.'
+        'API key is missing. Please configure the ELEVENLABS_API_KEY environment variable or provide one.'
       );
     }
 
-    return Ok(new ElevenLabsClient({ apiKey }));
+    return Ok(new ElevenLabsClient({ apiKey: finalApiKey }));
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     return Err(`ElevenLabs client initialization failed: ${errorMessage}`);

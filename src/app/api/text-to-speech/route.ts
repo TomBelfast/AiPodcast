@@ -1,10 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createDialogue } from "@/actions/dialogue";
 import { CreateDialogueRequest } from "@/types";
+import { supabase } from "@/lib/supabase";
 
 export async function POST(request: NextRequest) {
   try {
     const body: CreateDialogueRequest = await request.json();
+
+    // Verify user identity
+    const authHeader = request.headers.get('Authorization');
+    const token = authHeader?.split(' ')[1];
+
+    let userEmail = '';
+
+    if (token) {
+      const { data: { user }, error } = await supabase.auth.getUser(token);
+      if (!error && user?.email) {
+        userEmail = user.email;
+      }
+    }
+
+    const isAdmin = userEmail === 'tomaszpasiekauk@gmail.com';
+
+    // Access Control Logic
+    if (!isAdmin && !body.apiKey) {
+      return NextResponse.json(
+        {
+          error: "Please complete your ElevenLabs API Key in Settings",
+          code: "MISSING_ELEVENLABS_KEY"
+        },
+        { status: 403 }
+      );
+    }
+
+    // For admin, if no key provided, we don't pass anything (action falls back to env)
+    // For user, body.apiKey is passed to action
 
     if (!body.inputs || body.inputs.length === 0) {
       return NextResponse.json(

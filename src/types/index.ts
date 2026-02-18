@@ -7,9 +7,10 @@ export interface CreateDialogueRequest {
   inputs: DialogueInput[];
   modelId?: string;
   seed?: number;
+  apiKey?: string;
 }
 
-export type Result<T> = 
+export type Result<T> =
   | { ok: true; value: T }
   | { ok: false; error: string };
 

@@ -12,13 +12,14 @@ export interface CreateDialogueRequest {
   inputs: DialogueInput[];
   modelId?: string;
   seed?: number;
+  apiKey?: string;
 }
 
 export async function createDialogue(
   request: CreateDialogueRequest
 ): Promise<Result<{ audioBase64: string; processingTimeMs: number }>> {
   const startTime = performance.now();
-  const clientResult = await getElevenLabsClient();
+  const clientResult = await getElevenLabsClient(request.apiKey);
   if (!clientResult.ok) return Err(clientResult.error);
 
   try {

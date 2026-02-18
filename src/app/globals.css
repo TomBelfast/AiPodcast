@@ -1,14 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --background: #050505;
+  --background: #181818;
   --foreground: #ffffff;
-  --text-muted: #a1a1aa;
-  --card-bg: rgba(255, 255, 255, 0.03);
-  --card-border: rgba(255, 255, 255, 0.08);
-  --accent-celadon: #25D366;
-  /* WhatsApp Light Green */
-  --accent-celadon-glow: rgba(37, 211, 102, 0.4);
+  --text-muted: #e4e4e7;
+  /* Zinc 200 - Very bright for muted text */
+  --card-bg: #1f1f1f;
+  /* Slightly more visible card bg */
+  --card-border: rgba(255, 255, 255, 0.15);
+  /* Brighter border */
+  --accent-celadon: #4ADE80;
+  /* Brighter Green (Green 400) */
+  /* WhatsApp Light Green - keeping variable name but brightening color */
+  --accent-celadon-glow: rgba(74, 222, 128, 0.5);
 
   --font-inter: var(--font-inter);
 }
@@ -55,20 +59,7 @@ body {
   position: relative;
 }
 
-body::before {
-  content: '';
-  position: fixed;
-  top: -50%;
-  left: -50%;
-  width: 200%;
-  height: 200%;
-  background:
-    radial-gradient(circle at 50% 50%, rgba(37, 211, 102, 0.05) 0%, transparent 40%),
-    radial-gradient(circle at 80% 20%, rgba(0, 100, 255, 0.05) 0%, transparent 30%),
-    linear-gradient(120deg, #050505 0%, #0a0a0a 100%);
-  z-index: -1;
-  animation: bg-drift 20s ease-in-out infinite alternate;
-}
+/* body::before removed to preserve pure #181818 background */
 
 /* Layout */
 /* Layout */
@@ -115,7 +106,8 @@ body::before {
 
 /* Card Style (Slab) */
 .slab {
-  background: linear-gradient(145deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.01) 100%);
+  background: #1f1f1f;
+  /* User requested app bg */
   border-top: 1px solid rgba(255, 255, 255, 0.15);
   /* Highlight */
   border-left: 1px solid rgba(255, 255, 255, 0.08);
@@ -409,6 +401,28 @@ body::before {
   overflow: hidden;
 }
 
+.monolith-header-btn {
+  padding: 8px 24px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  color: #e4e4e7;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  backdrop-filter: blur(4px);
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.monolith-header-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: white;
+  box-shadow: 0 0 15px rgba(255, 255, 255, 0.1);
+}
+
 .monolith-btn:hover:not(:disabled) {
   background: var(--accent-celadon);
   color: #050505;
@@ -530,7 +544,8 @@ body::before {
   align-items: center;
   gap: 10px;
   font-size: 14px;
-  color: #666;
+  color: #d4d4d8;
+  /* Zinc 300 */
   font-weight: 500;
   letter-spacing: 0.01em;
   line-height: 1.5;
