@@ -8,6 +8,22 @@ export interface CreateDialogueRequest {
   modelId?: string;
   seed?: number;
   apiKey?: string;
+  includeTimestamps?: boolean;
+}
+
+export interface VoiceSegment {
+  voiceId: string;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  characterStartIndex: number;
+  characterEndIndex: number;
+  dialogueInputIndex: number;
+}
+
+export interface CharacterAlignment {
+  characters: string[];
+  characterStartTimesSeconds: number[];
+  characterEndTimesSeconds: number[];
 }
 
 export type Result<T> =

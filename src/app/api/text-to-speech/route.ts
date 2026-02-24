@@ -22,8 +22,18 @@ export async function POST(request: NextRequest) {
 
     const isAdmin = userEmail === 'tomaszpasiekauk@gmail.com';
 
+    // 3. Get Admin Fallback Settings
+    const { getEffectiveAdminSettings } = await import("@/lib/admin-settings");
+    const adminSettings = getEffectiveAdminSettings();
+
     // Access Control Logic
-    if (!isAdmin && !body.apiKey) {
+    if (!body.apiKey) {
+      if (isAdmin || !authHeader) {
+        body.apiKey = adminSettings.elevenlabs_api_key;
+      }
+    }
+
+    if (!body.apiKey) {
       return NextResponse.json(
         {
           error: "Please complete your ElevenLabs API Key in Settings",
@@ -32,9 +42,6 @@ export async function POST(request: NextRequest) {
         { status: 403 }
       );
     }
-
-    // For admin, if no key provided, we don't pass anything (action falls back to env)
-    // For user, body.apiKey is passed to action
 
     if (!body.inputs || body.inputs.length === 0) {
       return NextResponse.json(
@@ -64,6 +71,9 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       audioBase64: result.value.audioBase64,
+      voiceSegments: result.value.voiceSegments,
+      alignment: result.value.alignment,
+      normalizedAlignment: result.value.normalizedAlignment,
       processingTimeMs: result.value.processingTimeMs,
     });
   } catch (error) {

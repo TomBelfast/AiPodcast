@@ -57,39 +57,20 @@ export async function POST(req: NextRequest) {
     const isAdmin = userEmail === 'tomaszpasiekauk@gmail.com';
 
     // Access Control Logic
-    if (!isAdmin && !userOpenaiApiKey) {
-      return NextResponse.json(
-        {
-          error: "Please complete your OpenAI API Key in Settings",
-          code: "MISSING_OPENAI_KEY"
-        },
-        { status: 403 }
-      );
+
+    // 3. Get Admin Fallback Settings
+    const { getEffectiveAdminSettings } = await import("@/lib/admin-settings");
+    const adminSettings = getEffectiveAdminSettings();
+
+    // Determine final key to use
+    // 1. Prioritize user key from request (if any)
+    // 2. Fall back to admin settings if user is admin OR if this is a session-less request (webhook)
+    let apiKey = userOpenaiApiKey;
+    if (!apiKey && (isAdmin || !authHeader)) {
+      apiKey = adminSettings.openai_api_key;
     }
 
-    // Determine if using OpenRouter based on key format or admin config
-    const isOpenRouterKey = userOpenaiApiKey?.startsWith('sk-or-');
-
-    // Use OpenRouter instead of OpenAI
-    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
-    // Prioritize user key if provided, else fall back to env key (ONLY for admin)
-    const envOpenaiApiKey = isAdmin ? process.env.OPENAI_API_KEY : undefined;
-
-    // Final key to use
-    const apiKey = userOpenaiApiKey || (isAdmin ? (process.env.OPENROUTER_API_KEY || envOpenaiApiKey) : undefined);
-
-    // Use OpenRouter if:
-    // 1. User provided a key starting with 'sk-or-'
-    // 2. OR User is admin AND no user key provided AND admin has OpenRouter env var
-    const useOpenRouter = isOpenRouterKey || (isAdmin && !userOpenaiApiKey && !!openRouterApiKey);
-
     if (!apiKey) {
-      if (isAdmin) {
-        return NextResponse.json(
-          { error: "System API keys not configured" },
-          { status: 500 }
-        );
-      }
       return NextResponse.json(
         {
           error: "Please complete your API Key in Settings",
@@ -98,6 +79,14 @@ export async function POST(req: NextRequest) {
         { status: 403 }
       );
     }
+
+    const isOpenRouterKey = apiKey.startsWith('sk-or-');
+    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+
+    // Use OpenRouter if:
+    // 1. Key starts with 'sk-or-'
+    // 2. OR User is admin/webhook AND admin has OpenRouter env var (or local config says so)
+    const useOpenRouter = isOpenRouterKey || (isAdmin && !userOpenaiApiKey && !!openRouterApiKey);
 
     let openaiClient;
     const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
@@ -292,15 +281,15 @@ Speaker2 (Female - Pessimistic & Arrogant):
 - Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
 
     // Use prompts from request or fallback to defaults
-    const usedMainPrompt = mainPrompt || defaultMainPrompt;
-    const usedPolishEndingPrompt = polishEndingPrompt || defaultPolishEndingPrompt;
+    const usedMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPrompt;
+    const usedPolishEndingPrompt = polishEndingPrompt || adminSettings.polish_ending_prompt || defaultPolishEndingPrompt;
 
     // Build host personalities section - use provided prompts or defaults
     let hostPersonalitiesSection = '';
     if (isPolish) {
-      hostPersonalitiesSection = hostPersonalitiesPromptPolish || defaultHostPersonalitiesPolish;
+      hostPersonalitiesSection = hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish || defaultHostPersonalitiesPolish;
     } else {
-      const personalitiesPrompt = hostPersonalitiesPromptOther || defaultHostPersonalitiesOther;
+      const personalitiesPrompt = hostPersonalitiesPromptOther || adminSettings.host_prompt_other || defaultHostPersonalitiesOther;
       hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
     }
 

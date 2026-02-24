@@ -61,23 +61,49 @@ export async function POST(req: NextRequest) {
 
         let conversation = null;
         const decoder = new TextDecoder();
+        let buffer = '';
 
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
 
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n').filter(l => l.trim());
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+
+            // The last item might be a partial line, so keep it in the buffer
+            buffer = lines.pop() || '';
 
             for (const line of lines) {
+                const trimmedLine = line.trim();
+                if (!trimmedLine) continue;
+
                 try {
-                    const parsed = JSON.parse(line);
+                    const parsed = JSON.parse(trimmedLine);
                     if (parsed.type === 'complete') {
                         conversation = parsed.data.conversation;
+                    } else if (parsed.type === 'error') {
+                        throw new Error(parsed.error || 'Unknown error during generation');
                     }
-                } catch (e) {
-                    console.warn('Failed to parse stream chunk', e);
+                } catch (e: any) {
+                    if (e.name === 'SyntaxError') {
+                        console.warn('Incomplete JSON line, skipping until next:', trimmedLine);
+                    } else {
+                        throw e; // Rethrow actual errors (like the generation error)
+                    }
                 }
+            }
+        }
+
+        // Final flush of the decoder
+        buffer += decoder.decode(new Uint8Array(), { stream: false });
+        if (buffer.trim()) {
+            try {
+                const parsed = JSON.parse(buffer.trim());
+                if (parsed.type === 'complete') {
+                    conversation = parsed.data.conversation;
+                }
+            } catch (e) {
+                console.warn('Final buffer chunk could not be parsed', e);
             }
         }
 

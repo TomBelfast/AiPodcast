@@ -298,6 +298,8 @@ export default function Home() {
     const fetchUserSettings = async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (session) {
+        const isAdmin = session.user.email === 'tomaszpasiekauk@gmail.com';
+
         const { data, error } = await supabase
           .from('user_settings')
           .select('*')
@@ -313,15 +315,51 @@ export default function Home() {
           if (data.host_prompt_polish) setHostPersonalitiesPromptPolish(data.host_prompt_polish);
           if (data.host_prompt_other) setHostPersonalitiesPromptOther(data.host_prompt_other);
 
-          // Auto-open modal if keys are missing
+          // Auto-open modal if keys are missing (unless admin)
           if (!data.openai_api_key || !data.elevenlabs_api_key) {
-            setSettingsMessage('INITIALIZATION REQUIRED: PLEASE CONFIGURE API KEYS');
-            setShowSettingsModal(true);
+            if (isAdmin) {
+              // Admin: Sync from env if missing in DB
+              try {
+                const syncRes = await fetch('/api/admin/sync-keys', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${session.access_token}`
+                  }
+                });
+                if (syncRes.ok) {
+                  const syncData = await syncRes.json();
+                  console.log("Admin keys synced:", syncData);
+                  // Refresh settings after sync
+                  fetchUserSettings();
+                  return;
+                }
+              } catch (e) {
+                console.error("Failed to sync admin keys:", e);
+              }
+            } else {
+              setSettingsMessage('INITIALIZATION REQUIRED: PLEASE CONFIGURE API KEYS');
+              setShowSettingsModal(true);
+            }
           }
         } else {
           // No settings found (new user)
-          const isAdmin = session.user.email === 'tomaszpasiekauk@gmail.com';
-          if (!isAdmin) {
+          if (isAdmin) {
+            // Admin: First time setup, sync from env
+            try {
+              const syncRes = await fetch('/api/admin/sync-keys', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${session.access_token}`
+                }
+              });
+              if (syncRes.ok) {
+                fetchUserSettings();
+                return;
+              }
+            } catch (e) {
+              console.error("Failed to initial sync admin keys:", e);
+            }
+          } else {
             setSettingsMessage('WELCOME USER: INITIAL CONFIGURATION REQUIRED');
             setShowSettingsModal(true);
           }
