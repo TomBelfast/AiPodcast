@@ -6,6 +6,11 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { transcript, title, language, metadata } = body;
 
+    console.log(`[Webhook Transcript] Received: ${title || 'Untitled'}, Language: ${language || 'N/A'}`);
+    if (transcript) {
+      console.log(`[Webhook Transcript] Transcript snippet: ${transcript.substring(0, 100)}...`);
+    }
+
     if (!transcript) {
       return NextResponse.json(
         { error: 'Transcript is required' },

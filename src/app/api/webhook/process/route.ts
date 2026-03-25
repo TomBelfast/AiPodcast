@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { streamObject } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
+import { getEffectiveAdminSettings } from '@/lib/admin-settings';
 
 const podcastSchema = z.object({
   conversation: z
@@ -40,9 +41,18 @@ export async function POST(req: NextRequest) {
     const validLanguages = ['en', 'pl', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh'];
     const selectedLanguage = validLanguages.includes(language) ? language : 'en';
 
+    console.log(`[Webhook Process] JobID: ${jobId}, Language: ${selectedLanguage}, Title: ${title || 'N/A'}`);
+    if (transcript) {
+      console.log(`[Webhook Process] Transcript snippet: ${transcript.substring(0, 100)}...`);
+    }
+
+    // Get Admin Settings
+    const adminSettings = getEffectiveAdminSettings();
+
     // Use OpenRouter or OpenAI
     const openRouterApiKey = process.env.OPENROUTER_API_KEY;
     const openaiApiKey = process.env.OPENAI_API_KEY;
+    // Force OpenRouter if key is in env
     const useOpenRouter = !!openRouterApiKey;
 
     if (!openRouterApiKey && !openaiApiKey) {
@@ -138,15 +148,18 @@ Speaker2 (Female - Pessimistic & Arrogant):
 - Uses more formal or sophisticated language`;
 
     // Build prompt with language-specific instructions - use provided prompts or defaults
-    let dialectInstructions = '';
-    if (selectedLanguage === 'pl') {
-      dialectInstructions = '\n' + (hostPersonalitiesPromptPolish || defaultHostPersonalitiesPolish);
-    } else {
-      const personalitiesPrompt = hostPersonalitiesPromptOther || defaultHostPersonalitiesOther;
-      dialectInstructions = '\n' + personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
-    }
+    const usedMainPrompt = mainPrompt || adminSettings.main_prompt;
+    const usedPolishEndingPrompt = polishEndingPrompt || adminSettings.polish_ending_prompt || defaultPolishEndingPrompt;
 
-    const usedPolishEndingPrompt = polishEndingPrompt || defaultPolishEndingPrompt;
+    let hostPersonalitiesSection = '';
+    if (selectedLanguage === 'pl') {
+      hostPersonalitiesSection = hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish || defaultHostPersonalitiesPolish;
+      console.log(`[Webhook Process] Using Polish host personalities (Custom: ${!!(hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish)})`);
+    } else {
+      const personalitiesPrompt = hostPersonalitiesPromptOther || adminSettings.host_prompt_other || defaultHostPersonalitiesOther;
+      hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
+      console.log(`[Webhook Process] Using other host personalities for ${languageName}`);
+    }
 
     // Generate conversation from transcript
     const result = await streamObject({
@@ -156,15 +169,18 @@ Speaker2 (Female - Pessimistic & Arrogant):
       The conversation should be in ${languageName} language.
       Make it engaging, conversational, and natural. Add appropriate pauses, reactions, and dialogue flow.
       All dialogue should be in ${languageName}.
-      ${dialectInstructions}
-
-Transcript:
-${transcript}
-
-Title: ${title || 'Untitled Podcast'}
-Language: ${languageName} (${selectedLanguage})
-
-${selectedLanguage === 'pl' ? usedPolishEndingPrompt : ''}`,
+      ${hostPersonalitiesSection}
+      ${usedMainPrompt || ''}
+ 
+ Transcript:
+ ${transcript}
+ 
+ Title: ${title || 'Untitled Podcast'}
+ Language: ${languageName} (${selectedLanguage})
+ 
+ ${selectedLanguage === 'pl' ? usedPolishEndingPrompt : ''}
+ 
+ IMPORTANT: Make this a natural conversation of about 2-3 minutes (average 2.5 mins). Aim for 6000-7000 characters total. Use 20-25 dynamic exchanges. Focus on the most interesting or surprising aspects of the content.`,
     });
 
     // Collect the full conversation

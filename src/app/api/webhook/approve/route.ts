@@ -44,9 +44,10 @@ export async function POST(req: NextRequest) {
       voiceId: (item.speaker === 'Speaker1' || item.speaker === 'Antoni') ? voice1Id : voice2Id,
     }));
 
-    // Generate audio
+    // Generate audio with timestamps
     const dialogueRequest: CreateDialogueRequest = {
       inputs: dialogueInputs,
+      includeTimestamps: true, // Always include timestamps for alignment data
     };
 
     const result = await createDialogue(dialogueRequest);
@@ -59,42 +60,86 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const audioBase64 = result.value.audioBase64;
+    const { audioBase64, voiceSegments, alignment, normalizedAlignment } = result.value;
 
     // Save file locally first
     await ensureArchiveDir();
     const base64Data = audioBase64.includes(',') ? audioBase64.split(',')[1] : audioBase64;
     const audioBuffer = Buffer.from(base64Data, 'base64');
     const safeTitle = (title || 'podcast').replace(/[^a-z0-9]/gi, '_').substring(0, 50);
-    const filename = `${safeTitle}_${jobId}.mp3`;
-    const filePath = path.join(ARCHIVE_DIR, filename);
-    await fs.writeFile(filePath, audioBuffer);
+    const audioFilename = `${safeTitle}_${jobId}.mp3`;
+    const audioFilePath = path.join(ARCHIVE_DIR, audioFilename);
+    const jsonFilename = `${safeTitle}_${jobId}.json`;
+    const jsonFilePath = path.join(ARCHIVE_DIR, jsonFilename);
+
+    await fs.writeFile(audioFilePath, audioBuffer);
+
+    // Prepare raw metadata
+    const rawMetadata = {
+      jobId,
+      title: title || 'Untitled Podcast',
+      speakers: {
+        Speaker1: { name: 'Speaker 1', voiceId: voice1Id, gender: 'male', personality: 'Energetic/Naive' },
+        Speaker2: { name: 'Speaker 2', voiceId: voice2Id, gender: 'female', personality: 'Pessimistic/Arrogant' },
+        Antoni: { name: 'Antoni', voiceId: voice1Id, gender: 'male', personality: 'Silesian/Energetic' },
+        Zofia: { name: 'Zofia', voiceId: voice2Id, gender: 'female', personality: 'Goral/Pessimistic' }
+      },
+      conversation,
+      voiceSegments: voiceSegments?.map(s => ({
+        ...s,
+        speaker: (s.voiceId === voice1Id) ? 'Antoni' : 'Zofia'
+      })),
+      alignment,
+      normalizedAlignment,
+      audioFilename,
+      timestamp: new Date().toISOString()
+    };
+
+    // Parse to normalized Podcast AI format
+    const { parseElevenLabsTranscript } = await import('@/lib/transcript-parser');
+    const metadata = parseElevenLabsTranscript(rawMetadata);
+    
+    await fs.writeFile(jsonFilePath, JSON.stringify(metadata, null, 2));
 
     // Upload to MinIO if requested
     let minioUrl: string | null = null;
+    let minioJsonUrl: string | null = null;
+
     if (uploadToMinIO) {
       try {
-        const minioResult = await uploadToMinIOStorage(audioBase64, title ?? 'podcast', jobId);
+        console.log(`[Webhook Approve] Uploading audio to MinIO for JobID: ${jobId}`);
+        const minioResult = await uploadToMinIOStorage(audioBase64, audioFilename, 'audio/mpeg');
         if (minioResult.success) {
           minioUrl = minioResult.url ?? null;
         }
+
+        console.log(`[Webhook Approve] Uploading JSON transcript to MinIO for JobID: ${jobId}`);
+        const jsonBase64 = Buffer.from(JSON.stringify(metadata)).toString('base64');
+        const minioJsonResult = await uploadToMinIOStorage(jsonBase64, jsonFilename, 'application/json');
+        if (minioJsonResult.success) {
+          minioJsonUrl = minioJsonResult.url ?? null;
+        }
       } catch (minioError) {
         console.error('Error uploading to MinIO:', minioError);
-        // Continue even if MinIO upload fails
       }
     }
 
-    // Return download URL (prefer MinIO if available, otherwise local)
+    // Return download URLs and the metadata
     const downloadUrl = minioUrl ||
-      `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/webhook/download/${jobId}`;
+      `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/webhook/download/${jobId}?type=audio`;
+    const metadataUrl = minioJsonUrl ||
+      `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/webhook/download/${jobId}?type=json`;
 
     return NextResponse.json({
       success: true,
       jobId,
       downloadUrl,
+      metadataUrl,
       minioUrl,
-      filename,
-      message: 'Audio generated successfully',
+      minioJsonUrl,
+      filename: audioFilename,
+      transcript: metadata,
+      message: 'Audio and normalized transcript generated successfully',
     });
   } catch (error) {
     console.error('Error approving conversation:', error);
@@ -107,9 +152,9 @@ export async function POST(req: NextRequest) {
 
 // Helper function to upload to MinIO
 async function uploadToMinIOStorage(
-  audioBase64: string,
-  title: string,
-  jobId: string
+  base64Data: string,
+  filename: string,
+  contentType: string
 ): Promise<{ success: boolean; url?: string; error?: string }> {
   try {
     // Dynamic import to avoid loading MinIO if not needed
@@ -173,29 +218,22 @@ async function uploadToMinIOStorage(
         ],
       };
       await minioClient.setBucketPolicy(bucketName, JSON.stringify(publicPolicy));
-      console.log(`Bucket ${bucketName} set to public read`);
     } catch (policyError) {
-      // Policy might already be set or we don't have permissions - that's okay
       console.log(`Bucket policy setting skipped: ${(policyError as Error).message}`);
     }
 
     // Convert base64 to buffer
-    const base64Data = audioBase64.includes(',') ? audioBase64.split(',')[1] : audioBase64;
-    const audioBuffer = Buffer.from(base64Data, 'base64');
-
-    // Generate filename
-    const safeTitle = title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
-    const filename = `${safeTitle}_${jobId}.mp3`;
+    const pureBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+    const buffer = Buffer.from(pureBase64, 'base64');
 
     // Upload to MinIO
-    await minioClient.putObject(bucketName, filename, audioBuffer, audioBuffer.length, {
-      'Content-Type': 'audio/mpeg',
+    await minioClient.putObject(bucketName, filename, buffer, buffer.length, {
+      'Content-Type': contentType,
     });
 
-    // Generate URL - use public URL if bucket is public, otherwise presigned URL
+    // Generate URL
     let url: string;
     try {
-      // Try to get bucket policy to check if it's public
       const policy = await minioClient.getBucketPolicy(bucketName);
       const policyObj = JSON.parse(policy);
       const isPublic = policyObj.Statement?.some((stmt: any) =>
@@ -203,17 +241,17 @@ async function uploadToMinIOStorage(
       );
 
       if (isPublic) {
-        // Use public URL for public bucket
         const protocol = useSSL ? 'https' : 'http';
-        url = `${protocol}://${endPoint}:${port}/${bucketName}/${filename}`;
+        url = `${protocol}://${endPoint}:${port === 443 || port === 80 ? '' : port}/${bucketName}/${filename}`;
+        // Fix potential double slash if port was omitted but colon remained
+        url = url.replace(/([^:]\/)\/+/g, "$1");
       } else {
-        // Use presigned URL for private bucket (valid for 7 days)
         url = await minioClient.presignedGetObject(bucketName, filename, 7 * 24 * 60 * 60);
       }
     } catch {
-      // If we can't check policy, assume public and use public URL
       const protocol = useSSL ? 'https' : 'http';
-      url = `${protocol}://${endPoint}:${port}/${bucketName}/${filename}`;
+      const portPart = (port === 443 && useSSL) || (port === 80 && !useSSL) ? '' : `:${port}`;
+      url = `${protocol}://${endPoint}${portPart}/${bucketName}/${filename}`;
     }
 
     return {

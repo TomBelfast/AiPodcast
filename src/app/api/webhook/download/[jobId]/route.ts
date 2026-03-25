@@ -11,6 +11,9 @@ export async function GET(
 ) {
   try {
     const { jobId } = await params;
+    const type = req.nextUrl.searchParams.get('type') || 'audio';
+    const extension = type === 'json' ? '.json' : '.mp3';
+    const contentType = type === 'json' ? 'application/json' : 'audio/mpeg';
 
     if (!jobId) {
       return NextResponse.json(
@@ -20,13 +23,12 @@ export async function GET(
     }
 
     // Find file by jobId in archive directory
-    // Files are named with jobId in the filename
     const files = await fs.readdir(ARCHIVE_DIR);
-    const matchingFile = files.find(file => file.includes(jobId) && file.endsWith('.mp3'));
+    const matchingFile = files.find(file => file.includes(jobId) && file.endsWith(extension));
 
     if (!matchingFile) {
       return NextResponse.json(
-        { error: 'File not found for this job ID' },
+        { error: `File (${type}) not found for this job ID` },
         { status: 404 }
       );
     }
@@ -39,7 +41,7 @@ export async function GET(
     // Return file with appropriate headers
     return new NextResponse(new Uint8Array(fileBuffer), {
       headers: {
-        'Content-Type': 'audio/mpeg',
+        'Content-Type': contentType,
         'Content-Disposition': `attachment; filename="${matchingFile}"`,
         'Content-Length': fileBuffer.length.toString(),
       },

@@ -1010,6 +1010,13 @@ export default function Home() {
           >
             Settings
           </button>
+          <a
+            href="/podcast-video"
+            className="monolith-header-btn"
+            style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+          >
+            PodcastVideo
+          </a>
           <button
             onClick={handleLogout}
             className="monolith-header-btn"
