@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 
 type InputMode = 'script' | 'conversation' | 'transcript';
 
@@ -140,6 +140,8 @@ export default function PodcastVideoPage() {
     if (inputMode === 'transcript') return defaultTranscript;
     return defaultScript;
   }, [inputMode]);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const coverUrl = useMemo(
     () => `/api/podcast-video/cover?v=${coverVersion}`,
@@ -536,32 +538,43 @@ export default function PodcastVideoPage() {
                 </div>
               </div>
 
-              <form onSubmit={handleCoverUpload} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <span className="monolith-title" style={{ fontSize: '10px' }}>Podmien PNG</span>
-                  <input
-                    type="file"
-                    accept="image/png"
-                    onChange={(event) => {
-                      setCoverMessage(null);
-                      setSelectedCoverFile(event.target.files?.[0] || null);
-                    }}
-                    style={{ fontSize: '12px', color: 'var(--text-muted)' }}
-                  />
-                </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <input
+                  type="file"
+                  accept="image/png"
+                  ref={fileInputRef}
+                  onChange={(event) => {
+                    setCoverError(null);
+                    setCoverMessage(null);
+                    setSelectedCoverFile(event.target.files?.[0] || null);
+                  }}
+                  style={{ display: 'none' }}
+                />
+
+                <button
+                  type="button"
+                  className="monolith-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{ 
+                    background: selectedCoverFile ? 'rgba(74, 222, 128, 0.1)' : 'rgba(255,255,255,0.03)',
+                    borderColor: selectedCoverFile ? 'var(--accent-celadon)' : 'rgba(255,255,255,0.1)'
+                  }}
+                >
+                  {selectedCoverFile ? 'Zmień wybrany plik' : 'WYBIERZ PLIK PNG...'}
+                </button>
 
                 {selectedCoverFile && (
                   <div
                     style={{
                       padding: '10px 12px',
-                      background: 'rgba(255,255,255,0.03)',
+                      background: 'rgba(74, 222, 128, 0.05)',
                       borderRadius: '12px',
-                      border: '1px solid rgba(255,255,255,0.05)',
+                      border: '1px solid rgba(74, 222, 128, 0.2)',
                       fontSize: '12px',
-                      color: 'var(--text-muted)',
+                      color: 'var(--accent-celadon)',
                     }}
                   >
-                    Wybrany plik: {selectedCoverFile.name}
+                    Wybrano: <strong>{selectedCoverFile.name}</strong>
                   </div>
                 )}
 
@@ -595,15 +608,24 @@ export default function PodcastVideoPage() {
                   </div>
                 )}
 
-                <button
-                  type="submit"
-                  className="monolith-btn"
-                  disabled={isUploadingCover}
-                  style={{ opacity: isUploadingCover ? 0.7 : 1 }}
-                >
-                  {isUploadingCover ? 'AKTUALIZUJE PNG...' : 'PODMIEN COVER'}
-                </button>
-              </form>
+                {selectedCoverFile && (
+                  <form onSubmit={handleCoverUpload}>
+                    <button
+                      type="submit"
+                      className="monolith-btn primary"
+                      disabled={isUploadingCover}
+                      style={{ 
+                        opacity: isUploadingCover ? 0.7 : 1,
+                        width: '100%',
+                        height: '46px',
+                        marginTop: '4px'
+                      }}
+                    >
+                      {isUploadingCover ? 'PRZESYŁANIE...' : 'ZATWIERDŹ I PODMIEŃ COVER'}
+                    </button>
+                  </form>
+                )}
+              </div>
             </div>
           </section>
 
