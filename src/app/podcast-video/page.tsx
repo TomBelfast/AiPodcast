@@ -493,17 +493,20 @@ export default function PodcastVideoPage() {
                   background: 'rgba(0,0,0,0.45)',
                 }}
               >
-                <img
-                  src={coverUrl}
-                  alt="Aktualny cover podcast video"
-                  style={{
-                    width: '100%',
-                    display: 'block',
-                    aspectRatio: '16 / 9',
-                    objectFit: 'cover',
-                    background: '#05070d',
-                  }}
-                />
+                <div style={{ maxWidth: '240px', margin: '0 auto', width: '100%' }}>
+                  <img
+                    src={coverUrl}
+                    alt="Aktualny cover podcast video"
+                    style={{
+                      width: '100%',
+                      display: 'block',
+                      aspectRatio: '9 / 16',
+                      objectFit: 'contain',
+                      background: '#05070d',
+                      borderRadius: '12px',
+                    }}
+                  />
+                </div>
               </div>
 
               <div
