@@ -30,6 +30,149 @@ import {
 } from '@/lib/transcript-parser';
 import { getPodcastVideoCoverPath } from '@/lib/podcast-video/cover';
 
+const CAPTION_NOISE_WORDS = new Set([
+  'sigh',
+  'sighs',
+  'laughed',
+  'laugh',
+  'laughs',
+  'chuckle',
+  'chuckles',
+  'chuckling',
+  'gasp',
+  'gasps',
+  'pause',
+  'pauses',
+  'paused',
+  'hesitate',
+  'hesitates',
+  'hesitating',
+  'excited',
+  'surprised',
+  'skeptical',
+  'thoughtful',
+  'confused',
+  'amazed',
+  'eye',
+  'roll',
+  'eyeroll',
+  'groan',
+  'groans',
+  'whisper',
+  'whispers',
+  'wzdycha',
+  'wzdych',
+  'westchnienie',
+  'smiech',
+  'śmiech',
+  'smieje',
+  'śmieje',
+  'prycha',
+  'pauza',
+  'eh',
+  'ehh',
+  'eee',
+  'yyy',
+  'uh',
+  'uhh',
+  'um',
+  'umm',
+  'erm',
+  'hmm',
+  'mm',
+]);
+
+function normalizeCaptionToken(value: string): string {
+  return value
+    .toLocaleLowerCase('pl-PL')
+    .replace(/^[^0-9\p{L}]+|[^0-9\p{L}]+$/gu, '')
+    .trim();
+}
+
+function sanitizeCaptionText(value: string): string {
+  return value
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\(([^)]*)\)/g, (_, inner: string) => {
+      const trimmed = inner.replace(/\s+/g, ' ').trim();
+      return trimmed.split(' ').length <= 5 ? ' ' : ` (${trimmed}) `;
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shouldKeepCaptionWord(text: string): boolean {
+  const normalized = normalizeCaptionToken(text);
+  return Boolean(normalized) && !CAPTION_NOISE_WORDS.has(normalized);
+}
+
+function sanitizeTranscriptForCaptions(transcript: NormalizedTranscript): NormalizedTranscript {
+  const filteredWordsBySegment = new Map<number, typeof transcript.words>();
+
+  for (const word of transcript.words || []) {
+    if (!shouldKeepCaptionWord(word.text || '')) {
+      continue;
+    }
+
+    const list = filteredWordsBySegment.get(word.segment_id) || [];
+    list.push(word);
+    filteredWordsBySegment.set(word.segment_id, list);
+  }
+
+  const nextSegments: typeof transcript.segments = [];
+  const nextWords: typeof transcript.words = [];
+  let nextWordId = 0;
+
+  for (const segment of transcript.segments || []) {
+    const keptWords = filteredWordsBySegment.get(segment.id) || [];
+    const fallbackText = sanitizeCaptionText(segment.text || '');
+    const textFromWords = keptWords.map((word) => word.text).join(' ').replace(/\s+/g, ' ').trim();
+    const nextText = textFromWords || fallbackText;
+
+    if (!nextText) {
+      continue;
+    }
+
+    const nextSegmentId = nextSegments.length;
+    const nextSegmentStart = keptWords[0]?.start_time ?? segment.start_time;
+    const nextSegmentEnd = keptWords.at(-1)?.end_time ?? segment.end_time;
+
+    nextSegments.push({
+      ...segment,
+      id: nextSegmentId,
+      start_time: nextSegmentStart,
+      end_time: Math.max(nextSegmentStart, nextSegmentEnd),
+      text: nextText,
+    });
+
+    for (const word of keptWords) {
+      nextWords.push({
+        ...word,
+        id: nextWordId,
+        segment_id: nextSegmentId,
+      });
+      nextWordId += 1;
+    }
+  }
+
+  const fullText = nextSegments
+    .map((segment) => segment.text)
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return {
+    ...transcript,
+    segments: nextSegments,
+    words: nextWords,
+    full_text: fullText,
+    warnings: [
+      ...(Array.isArray(transcript.warnings) ? transcript.warnings : []),
+      'captions_filtered_for_stage_directions',
+    ],
+  };
+}
+
 function dataUrlToBuffer(dataUrl: string): Buffer {
   const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
   return Buffer.from(base64, 'base64');
@@ -310,11 +453,12 @@ function finalizeTranscript(
   audioFilename: string
 ): NormalizedTranscript {
   const completed = ensureTranscriptCompleteness(transcript, title, audioFilename);
-  const exactSrt = buildExactSrt(completed);
+  const sanitized = sanitizeTranscriptForCaptions(completed);
+  const exactSrt = buildExactSrt(sanitized);
 
   return {
-    ...completed,
-    srt: exactSrt || completed.srt || '',
+    ...sanitized,
+    srt: exactSrt || sanitized.srt || '',
   };
 }
 
