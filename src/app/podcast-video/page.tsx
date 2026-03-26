@@ -122,7 +122,7 @@ export default function PodcastVideoPage() {
   const [payloadText, setPayloadText] = useState(defaultScript);
   const [style, setStyle] = useState('highlight');
   const [exactCaptions, setExactCaptions] = useState(true);
-  const [fontSize, setFontSize] = useState('90');
+  const [fontSize, setFontSize] = useState('86');
   const [lineColor, setLineColor] = useState('#FFFFFF');
   const [wordColor, setWordColor] = useState('#00FF04');
   const [outlineColor, setOutlineColor] = useState('#000000');
@@ -480,72 +480,30 @@ export default function PodcastVideoPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
           <section className="slab">
             <div className="section-header">
-              <h2 className="monolith-title">Cover & Video Result</h2>
+              <h2 className="monolith-title">Cover Podcastu</h2>
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div
+                className="slab"
                 style={{
-                  display: 'flex',
-                  gap: '12px',
-                  justifyContent: 'center',
-                  alignItems: 'start',
-                  flexWrap: 'wrap',
+                  padding: 0,
+                  overflow: 'hidden',
+                  borderRadius: '16px',
+                  background: 'rgba(0,0,0,0.45)',
                 }}
               >
-                {/* Cover Preview */}
-                <div
-                  className="slab"
+                <img
+                  src={coverUrl}
+                  alt="Aktualny cover podcast video"
                   style={{
-                    padding: 0,
-                    overflow: 'hidden',
-                    borderRadius: '16px',
-                    background: 'rgba(0,0,0,0.45)',
-                    maxWidth: (activeJob?.status === 'success' && activeJob.artifacts.mp4_url) ? '200px' : '280px',
-                    flex: '1 1 200px',
+                    width: '100%',
+                    display: 'block',
+                    aspectRatio: '16 / 9',
+                    objectFit: 'cover',
+                    background: '#05070d',
                   }}
-                >
-                  <div className="monolith-title" style={{ fontSize: '9px', padding: '6px 10px', background: 'rgba(255,255,255,0.03)', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                    ORIGINAL COVER
-                  </div>
-                  <img
-                    src={coverUrl}
-                    alt="Aktualny cover podcast video"
-                    style={{
-                      width: '100%',
-                      display: 'block',
-                      height: 'auto',
-                      objectFit: 'contain',
-                      background: '#05070d',
-                    }}
-                  />
-                </div>
-
-                {/* Video Preview */}
-                {(activeJob?.status === 'success' && activeJob.artifacts.mp4_url) && (
-                  <div
-                    className="slab audio-ready"
-                    style={{
-                      padding: 0,
-                      overflow: 'hidden',
-                      borderRadius: '16px',
-                      background: 'black',
-                      maxWidth: '200px',
-                      flex: '1 1 200px',
-                      border: '1px solid var(--accent-celadon)',
-                      boxShadow: '0 0 20px rgba(74, 222, 128, 0.15)',
-                    }}
-                  >
-                    <div className="monolith-title" style={{ fontSize: '9px', padding: '6px 10px', background: 'rgba(74, 222, 128, 0.1)', borderBottom: '1px solid rgba(74, 222, 128, 0.2)', color: 'var(--accent-celadon)' }}>
-                      RENDERED RESULT
-                    </div>
-                    <video
-                      src={activeJob.artifacts.mp4_url}
-                      controls
-                      style={{ width: '100%', display: 'block' }}
-                    />
-                  </div>
-                )}
+                />
               </div>
 
               <div
@@ -561,7 +519,7 @@ export default function PodcastVideoPage() {
                 </div>
                 <div
                   style={{
-                    fontSize: '11px',
+                    fontSize: '12px',
                     color: 'var(--text-muted)',
                     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
                     wordBreak: 'break-all',
@@ -572,7 +530,7 @@ export default function PodcastVideoPage() {
               </div>
 
               <form onSubmit={handleCoverUpload} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   <span className="monolith-title" style={{ fontSize: '10px' }}>Podmien PNG</span>
                   <input
                     type="file"
@@ -581,18 +539,18 @@ export default function PodcastVideoPage() {
                       setCoverMessage(null);
                       setSelectedCoverFile(event.target.files?.[0] || null);
                     }}
-                    style={{ fontSize: '11px', color: 'var(--text-muted)' }}
+                    style={{ fontSize: '12px', color: 'var(--text-muted)' }}
                   />
                 </label>
 
                 {selectedCoverFile && (
                   <div
                     style={{
-                      padding: '8px 10px',
+                      padding: '10px 12px',
                       background: 'rgba(255,255,255,0.03)',
-                      borderRadius: '10px',
+                      borderRadius: '12px',
                       border: '1px solid rgba(255,255,255,0.05)',
-                      fontSize: '11px',
+                      fontSize: '12px',
                       color: 'var(--text-muted)',
                     }}
                   >
@@ -603,11 +561,11 @@ export default function PodcastVideoPage() {
                 {coverMessage && (
                   <div
                     style={{
-                      padding: '10px',
+                      padding: '12px',
                       background: 'rgba(0,255,4,0.08)',
-                      borderRadius: '10px',
+                      borderRadius: '12px',
                       border: '1px solid rgba(0,255,4,0.22)',
-                      fontSize: '11px',
+                      fontSize: '12px',
                       color: '#9DFFA0',
                     }}
                   >
@@ -617,11 +575,11 @@ export default function PodcastVideoPage() {
 
                 <button
                   type="submit"
-                  className="monolith-btn small"
+                  className="monolith-btn"
                   disabled={isUploadingCover}
                   style={{ opacity: isUploadingCover ? 0.7 : 1 }}
                 >
-                  {isUploadingCover ? 'AKTUALIZUJE...' : 'PODMIEN COVER'}
+                  {isUploadingCover ? 'AKTUALIZUJE PNG...' : 'PODMIEN COVER'}
                 </button>
               </form>
             </div>
@@ -793,6 +751,21 @@ export default function PodcastVideoPage() {
               </div>
             </div>
           </section>
+
+          {/* Video Preview Section */}
+          {(activeJob?.status === 'success' && activeJob.artifacts.mp4_url) && (
+            <section className="slab audio-ready">
+              <div className="section-header">
+                <h2 className="monolith-title">Podgląd Wyniku</h2>
+              </div>
+              <video
+                src={activeJob.artifacts.mp4_url}
+                controls
+                className="slab"
+                style={{ width: '100%', padding: 0, overflow: 'hidden', background: 'black', borderRadius: '16px' }}
+              />
+            </section>
+          )}
         </div>
       </div>
     </div>

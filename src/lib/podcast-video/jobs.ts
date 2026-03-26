@@ -61,6 +61,9 @@ export async function createPodcastVideoJob(args: {
     sourceJobId: args.sourceJobId || null,
     publicBaseUrl: args.publicBaseUrl,
     captionSettings: args.captionSettings,
+    engineUsed: null,
+    renderMode: null,
+    fallbackReason: null,
     inputSummary: args.inputSummary,
     artifacts: getArtifactUrls(args.publicBaseUrl, args.jobId),
     files: {

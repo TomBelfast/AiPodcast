@@ -36,6 +36,7 @@ export interface PodcastVideoJobRequest {
   voice1?: string;
   voice2?: string;
   source_job_id?: string;
+  exact_captions?: boolean;
   style?: string;
   font_size?: number;
   line_color?: string;
@@ -49,6 +50,15 @@ export interface PodcastVideoArtifacts {
   srt_url: string | null;
   mp4_url: string | null;
 }
+
+export type PodcastVideoEngine = 'nca' | 'local' | null;
+
+export type PodcastVideoRenderMode =
+  | 'nca_auto'
+  | 'nca_exact_classic'
+  | 'local_highlight_exact'
+  | 'local_classic_exact'
+  | null;
 
 export interface PodcastVideoArtifactFiles {
   transcript_path: string | null;
@@ -73,6 +83,9 @@ export interface PodcastVideoJobRecord {
   sourceJobId: string | null;
   publicBaseUrl: string;
   captionSettings: PodcastVideoCaptionSettings;
+  engineUsed: PodcastVideoEngine;
+  renderMode: PodcastVideoRenderMode;
+  fallbackReason: string | null;
   inputSummary: {
     hasScriptText: boolean;
     hasConversation: boolean;
@@ -85,7 +98,7 @@ export interface PodcastVideoJobRecord {
 
 export const DEFAULT_PODCAST_VIDEO_CAPTION_SETTINGS: PodcastVideoCaptionSettings = {
   style: 'highlight',
-  font_size: 90,
+  font_size: 86,
   line_color: '#FFFFFF',
   word_color: '#00FF04',
   outline_color: '#000000',

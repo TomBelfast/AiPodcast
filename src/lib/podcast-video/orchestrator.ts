@@ -13,12 +13,16 @@ import {
   setPodcastVideoJobStage,
   updatePodcastVideoJob,
 } from '@/lib/podcast-video/jobs';
+import { buildExactSrt, hasWordTimings } from '@/lib/podcast-video/exact-captions';
+import { renderPodcastVideoLocally } from '@/lib/podcast-video/local-renderer';
 import { uploadBufferToMinio, uploadFileToMinio } from '@/lib/podcast-video/minio';
 import { composePodcastVideo, renderPodcastCaptions } from '@/lib/podcast-video/nca';
 import {
   DEFAULT_PODCAST_VIDEO_VOICES,
   type PodcastConversationItem,
+  type PodcastVideoCaptionSettings,
   type PodcastVideoJobRequest,
+  type PodcastVideoRenderMode,
 } from '@/lib/podcast-video/types';
 import {
   type NormalizedTranscript,
@@ -236,6 +240,15 @@ function ensureTranscriptCompleteness(
   title: string,
   audioFilename: string
 ): NormalizedTranscript {
+  const rawSrt = typeof transcript.srt === 'string' ? transcript.srt : '';
+  const normalizedSrt =
+    rawSrt.includes('\\n') && !rawSrt.includes('\n')
+      ? rawSrt
+          .replace(/\\r\\n/g, '\n')
+          .replace(/\\n/g, '\n')
+          .replace(/\\t/g, '\t')
+      : rawSrt;
+
   return {
     ...transcript,
     source: transcript.source || 'elevenlabs',
@@ -243,6 +256,7 @@ function ensureTranscriptCompleteness(
     title: transcript.title || title,
     audio_filename: transcript.audio_filename || audioFilename,
     timestamp: transcript.timestamp || new Date().toISOString(),
+    srt: normalizedSrt,
     warnings: Array.isArray(transcript.warnings) ? transcript.warnings : [],
   };
 }
@@ -290,6 +304,109 @@ function buildJobConversation(request: PodcastVideoJobRequest): PodcastConversat
   return [];
 }
 
+function finalizeTranscript(
+  transcript: NormalizedTranscript,
+  title: string,
+  audioFilename: string
+): NormalizedTranscript {
+  const completed = ensureTranscriptCompleteness(transcript, title, audioFilename);
+  const exactSrt = buildExactSrt(completed);
+
+  return {
+    ...completed,
+    srt: exactSrt || completed.srt || '',
+  };
+}
+
+function shouldUseLocalExactRenderer(args: {
+  preferExactCaptions: boolean;
+  transcript: NormalizedTranscript;
+  requestedStyle: string;
+}): boolean {
+  return (
+    args.preferExactCaptions &&
+    hasWordTimings(args.transcript) &&
+    args.requestedStyle !== 'classic'
+  );
+}
+
+function resolveLocalFallbackMode(args: {
+  transcript: NormalizedTranscript;
+  requestedStyle: string;
+}): 'highlight_exact' | 'classic_exact' {
+  if (hasWordTimings(args.transcript) && args.requestedStyle !== 'classic') {
+    return 'highlight_exact';
+  }
+
+  return 'classic_exact';
+}
+
+async function completeWithLocalRenderer(args: {
+  jobId: string;
+  transcript: NormalizedTranscript;
+  coverPath: string;
+  audioPath: string;
+  outputPath: string;
+  settings: PodcastVideoCaptionSettings;
+  fallbackReason?: string | null;
+}): Promise<void> {
+  const localMode = resolveLocalFallbackMode({
+    transcript: args.transcript,
+    requestedStyle: args.settings.style,
+  });
+  const renderMode: PodcastVideoRenderMode =
+    localMode === 'highlight_exact' ? 'local_highlight_exact' : 'local_classic_exact';
+
+  await updatePodcastVideoJob(args.jobId, {
+    engineUsed: 'local',
+    renderMode,
+    fallbackReason: args.fallbackReason || null,
+  });
+
+  await setPodcastVideoJobStage(
+    args.jobId,
+    'composing-video',
+    72,
+    args.fallbackReason
+      ? `NCA nie zakonczyl renderu (${args.fallbackReason}). Lokalny renderer przejmuje caly pipeline.`
+      : localMode === 'highlight_exact'
+        ? 'Lokalny renderer sklada MP4 i przygotowuje exact highlight slowo po slowie.'
+        : 'Lokalny renderer sklada MP4 i przygotowuje exact classic z oryginalnego tekstu.'
+  );
+
+  await setPodcastVideoJobStage(
+    args.jobId,
+    'rendering-captions',
+    88,
+    localMode === 'highlight_exact'
+      ? 'Lokalny renderer wypala highlight 1:1 na podstawie word timings z ElevenLabs.'
+      : 'Lokalny renderer wypala classic 1:1 z oryginalnego tekstu bez auto-transkrypcji.'
+  );
+
+  await renderPodcastVideoLocally({
+    imagePath: args.coverPath,
+    audioPath: args.audioPath,
+    outputPath: args.outputPath,
+    transcript: args.transcript,
+    settings: args.settings,
+    mode: localMode,
+  });
+
+  await updatePodcastVideoJob(args.jobId, {
+    status: 'success',
+    stage: 'success',
+    progress: 100,
+    engineUsed: 'local',
+    renderMode,
+    fallbackReason: args.fallbackReason || null,
+    message:
+      localMode === 'highlight_exact'
+        ? 'Finalne MP4 jest gotowe. Uzyto lokalnego renderera highlight 1:1 z tekstem i timingami ElevenLabs.'
+        : 'Finalne MP4 jest gotowe. Uzyto lokalnego renderera classic 1:1, bo transcript nie zawieral timings slowo po slowie.',
+    error: null,
+  });
+}
+
 export async function runPodcastVideoJob(
   jobId: string,
   request: PodcastVideoJobRequest
@@ -302,6 +419,7 @@ export async function runPodcastVideoJob(
   const title = request.title?.trim() || 'Podcast Video';
   const language = request.language?.trim() || 'pl';
   const coverPath = getPodcastVideoCoverPath();
+  const preferExactCaptions = request.exact_captions !== false;
 
   try {
     await ensurePodcastVideoArchiveDir(jobId);
@@ -382,81 +500,140 @@ export async function runPodcastVideoJob(
     );
 
     const transcript = request.transcript
-      ? ensureTranscriptCompleteness(
+      ? finalizeTranscript(
           request.transcript,
           title,
           path.basename(paths.audio)
         )
-      : parseElevenLabsTranscript(
-          buildRawMetadata({
-            jobId,
-            title,
-            audioFilename: path.basename(paths.audio),
-            conversation,
-            voiceSegments: dialogueResult.value.voiceSegments,
-            alignment: dialogueResult.value.alignment,
-            normalizedAlignment: dialogueResult.value.normalizedAlignment,
-            speakerVoiceMap,
-          })
+      : finalizeTranscript(
+          parseElevenLabsTranscript(
+            buildRawMetadata({
+              jobId,
+              title,
+              audioFilename: path.basename(paths.audio),
+              conversation,
+              voiceSegments: dialogueResult.value.voiceSegments,
+              alignment: dialogueResult.value.alignment,
+              normalizedAlignment: dialogueResult.value.normalizedAlignment,
+              speakerVoiceMap,
+            })
+          ),
+          title,
+          path.basename(paths.audio)
         );
 
     await writeJsonFile(paths.transcript, transcript);
     await writeTextFile(paths.srt, transcript.srt || '');
 
-    await setPodcastVideoJobStage(
-      jobId,
-      'uploading-assets',
-      60,
-      'Wysylam audio, cover i napisy do storage dla NCA.'
-    );
+    if (shouldUseLocalExactRenderer({
+      preferExactCaptions,
+      transcript,
+      requestedStyle: job.captionSettings.style,
+    })) {
+      await completeWithLocalRenderer({
+        jobId,
+        transcript,
+        coverPath,
+        audioPath: paths.audio,
+        outputPath: paths.mp4,
+        settings: job.captionSettings,
+      });
+      return;
+    }
 
-    const audioUrl = await uploadBufferToMinio(audioBuffer, `podcast-video/${jobId}/audio.mp3`, 'audio/mpeg');
-    const imageUrl = await uploadFileToMinio(
-      coverPath,
-      `podcast-video/${jobId}/podcast_cover.png`,
-      'image/png'
-    );
-    const srtUrl = transcript.srt
-      ? await uploadFileToMinio(paths.srt, `podcast-video/${jobId}/captions.srt`, 'application/x-subrip')
-      : null;
+    try {
+      await updatePodcastVideoJob(jobId, {
+        engineUsed: 'nca',
+        renderMode: preferExactCaptions ? 'nca_exact_classic' : 'nca_auto',
+        fallbackReason: null,
+      });
 
-    await setPodcastVideoJobStage(
-      jobId,
-      'composing-video',
-      72,
-      'NCA sklada bazowe MP4 z obrazu i audio.'
-    );
+      await setPodcastVideoJobStage(
+        jobId,
+        'uploading-assets',
+        60,
+        'Wysylam audio, cover i napisy do storage dla NCA.'
+      );
 
-    const baseVideoUrl = await composePodcastVideo({
-      jobId,
-      audioUrl,
-      imageUrl,
-    });
+      const audioUrl = await uploadBufferToMinio(
+        audioBuffer,
+        `podcast-video/${jobId}/audio.mp3`,
+        'audio/mpeg'
+      );
+      const imageUrl = await uploadFileToMinio(
+        coverPath,
+        `podcast-video/${jobId}/podcast_cover.png`,
+        'image/png'
+      );
+      const srtUrl = transcript.srt
+        ? await uploadFileToMinio(
+            paths.srt,
+            `podcast-video/${jobId}/captions.srt`,
+            'application/x-subrip'
+          )
+        : null;
 
-    await setPodcastVideoJobStage(
-      jobId,
-      'rendering-captions',
-      86,
-      'NCA renderuje finalne MP4 z napisami.'
-    );
+      await setPodcastVideoJobStage(
+        jobId,
+        'composing-video',
+        72,
+        'NCA sklada bazowe MP4 z obrazu i audio.'
+      );
 
-    const finalVideoUrl = await renderPodcastCaptions({
-      jobId,
-      videoUrl: baseVideoUrl,
-      settings: job.captionSettings,
-      srtUrl,
-    });
+      const baseVideoUrl = await composePodcastVideo({
+        jobId,
+        audioUrl,
+        imageUrl,
+      });
 
-    const finalVideoBuffer = await downloadBufferWithRetry(finalVideoUrl, 8, 4000);
-    await writeBufferFile(paths.mp4, finalVideoBuffer);
+      await setPodcastVideoJobStage(
+        jobId,
+        'rendering-captions',
+        86,
+        preferExactCaptions
+          ? 'NCA renderuje finalne MP4 z dokladnym SRT opartym o tekst ElevenLabs.'
+          : 'NCA renderuje finalne MP4 z auto-transkrypcja napisow.'
+      );
 
-    await updatePodcastVideoJob(jobId, {
-      status: 'success',
-      stage: 'success',
-      progress: 100,
-      message: 'Finalne MP4 jest gotowe do podgladu i pobrania.',
-      error: null,
-    });
+      const captionResult = await renderPodcastCaptions({
+        jobId,
+        videoUrl: baseVideoUrl,
+        settings: job.captionSettings,
+        srtUrl,
+        preferExactText: preferExactCaptions,
+      });
+
+      const finalVideoBuffer = await downloadBufferWithRetry(captionResult.url, 8, 4000);
+      await writeBufferFile(paths.mp4, finalVideoBuffer);
+
+      await updatePodcastVideoJob(jobId, {
+        status: 'success',
+        stage: 'success',
+        progress: 100,
+        engineUsed: 'nca',
+        renderMode:
+          captionResult.captionSource === 'provided_srt' ? 'nca_exact_classic' : 'nca_auto',
+        fallbackReason: null,
+        message:
+          captionResult.captionSource === 'provided_srt'
+            ? `Finalne MP4 jest gotowe. NCA uzyl dokladnego SRT z oryginalnego tekstu ElevenLabs w stylu ${captionResult.effectiveStyle}.`
+            : `Finalne MP4 jest gotowe. NCA uzyl auto-transkrypcji w stylu ${captionResult.effectiveStyle}.`,
+        error: null,
+      });
+    } catch (ncaError) {
+      const fallbackReason =
+        ncaError instanceof Error ? ncaError.message : String(ncaError);
+
+      await completeWithLocalRenderer({
+        jobId,
+        transcript,
+        coverPath,
+        audioPath: paths.audio,
+        outputPath: paths.mp4,
+        settings: job.captionSettings,
+        fallbackReason,
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await failPodcastVideoJob(jobId, 'failed', message, 100);

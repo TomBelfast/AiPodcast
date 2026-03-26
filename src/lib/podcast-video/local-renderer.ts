@@ -12,8 +12,9 @@ const OUTPUT_HEIGHT = 1920;
 const OUTPUT_FPS = 12;
 const OUTPUT_AUDIO_BITRATE = '192k';
 const FONT_FAMILY = 'DejaVu Sans';
-const SAFE_MARGIN_X = 120;
-const DEFAULT_MARGIN_V = 240;
+const SAFE_MARGIN_X = 140;
+const DEFAULT_MARGIN_V = 250;
+const HIGHLIGHT_VISIBLE_WORDS = 2;
 const EDGE_PUNCTUATION_PATTERN =
   /^[.,!?;:()[\]{}"„”'«»]+|[.,!?;:()[\]{}"„”'«»]+$/g;
 
@@ -39,6 +40,10 @@ export interface LocalPodcastRenderResult {
 
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
+}
+
+function toCaptionCase(value: string): string {
+  return value.toLocaleUpperCase('pl-PL');
 }
 
 function normalizeSeconds(value: number): number {
@@ -86,12 +91,12 @@ function normalizeComparableToken(value: string): string {
 
 function buildLineLimits(fontSize: number) {
   if (fontSize >= 88) {
-    return { maxWordsPerLine: 3, maxCharsPerLine: 18 };
+    return { maxWordsPerLine: 4, maxCharsPerLine: 24 };
   }
   if (fontSize >= 72) {
-    return { maxWordsPerLine: 4, maxCharsPerLine: 22 };
+    return { maxWordsPerLine: 5, maxCharsPerLine: 30 };
   }
-  return { maxWordsPerLine: 5, maxCharsPerLine: 28 };
+  return { maxWordsPerLine: 6, maxCharsPerLine: 36 };
 }
 
 function splitTokensIntoLines<T extends { text: string }>(
@@ -150,17 +155,28 @@ function renderHighlightedText(
 ): string {
   const activeColor = hexToAssColor(wordColor);
   const inactiveColor = hexToAssColor(lineColor);
+  const flattened = lines.flat();
+  const activeIndex = flattened.findIndex((token) => token.id === activeWordId);
+
+  if (activeIndex < 0) {
+    return '';
+  }
+
+  const visibleStartIndex = Math.max(0, activeIndex - (HIGHLIGHT_VISIBLE_WORDS - 1));
+  const visibleIds = new Set(
+    flattened.slice(visibleStartIndex, activeIndex + 1).map((token) => token.id)
+  );
 
   return lines
     .map((line) =>
       line
-        .filter((token) => token.id <= activeWordId)
+        .filter((token) => visibleIds.has(token.id))
         .map((token) => {
-          const escaped = escapeAssText(token.text);
+          const displayText = escapeAssText(toCaptionCase(token.text));
           if (token.id === activeWordId) {
-            return `{\\c${activeColor}}${escaped}{\\c${inactiveColor}}`;
+            return `{\\c${activeColor}}${displayText}{\\c${inactiveColor}}`;
           }
-          return escaped;
+          return displayText;
         })
         .join(' ')
     )
@@ -175,8 +191,8 @@ function buildAssHeader(settings: PodcastVideoCaptionSettings): string {
   return [
     '[Script Info]',
     'ScriptType: v4.00+',
-    'PlayResX: 1080',
-    'PlayResY: 1920',
+    `PlayResX: ${OUTPUT_WIDTH}`,
+    `PlayResY: ${OUTPUT_HEIGHT}`,
     'ScaledBorderAndShadow: yes',
     'WrapStyle: 2',
     'Collisions: Normal',
@@ -367,7 +383,7 @@ function buildClassicAss(
 
     for (const group of groups) {
       const text = group.lines
-        .map((line) => line.map((token) => escapeAssText(token.text)).join(' '))
+        .map((line) => line.map((token) => escapeAssText(toCaptionCase(token.text))).join(' '))
         .join('\\N');
       lines.push(
         `Dialogue: 0,${formatAssTime(group.startTime)},${formatAssTime(group.endTime)},Default,,0,0,${DEFAULT_MARGIN_V},,${text}`
@@ -395,8 +411,8 @@ async function runFfmpegRender(args: {
   outputPath: string;
 }): Promise<void> {
   const subtitleFilter = [
-    `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos`,
-    `crop=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}`,
+    `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos`,
+    `pad=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2`,
     `ass=${args.assPath}`,
   ].join(',');
 

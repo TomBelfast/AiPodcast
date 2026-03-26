@@ -22,16 +22,17 @@ export async function GET(
   { params }: { params: Promise<{ jobId: string }> }
 ) {
   try {
-    if (!isPodcastVideoAuthorized(request)) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const type = parseType(request.nextUrl.searchParams.get('type'));
     if (!type) {
       return NextResponse.json(
         { error: 'Query param type must be one of: json, mp3, srt, mp4.' },
         { status: 400 }
       );
+    }
+
+    const isPublicArtifact = type === 'mp4';
+    if (!isPublicArtifact && !isPodcastVideoAuthorized(request)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
     const { jobId } = await params;
@@ -51,7 +52,7 @@ export async function GET(
         'Content-Type': getArtifactContentType(type),
         'Content-Length': fileBuffer.length.toString(),
         'Content-Disposition': `${disposition}; filename="${jobId}.${type}"`,
-        'Cache-Control': 'no-store',
+        'Cache-Control': isPublicArtifact ? 'public, max-age=3600' : 'no-store',
       },
     });
   } catch (error) {

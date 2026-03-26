@@ -62,6 +62,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if (body.includeTimestamps === undefined) {
+      body.includeTimestamps = true;
+    }
+
     const result = await createDialogue(body);
 
     if (!result.ok) {
@@ -69,11 +73,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: result.error }, { status: 500 });
     }
 
+    // Parse to normalized format for convenience if requested or as a standard
+    const { parseElevenLabsTranscript } = await import('@/lib/transcript-parser');
+    const parsedTranscript = parseElevenLabsTranscript({
+      ...result.value,
+      conversation: body.inputs.map(i => ({ speaker: '', text: i.text })), // Simplified mapping for TTS-only
+    });
+
     return NextResponse.json({
       audioBase64: result.value.audioBase64,
       voiceSegments: result.value.voiceSegments,
       alignment: result.value.alignment,
       normalizedAlignment: result.value.normalizedAlignment,
+      transcript: parsedTranscript,
       processingTimeMs: result.value.processingTimeMs,
     });
   } catch (error) {

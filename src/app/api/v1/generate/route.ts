@@ -29,6 +29,11 @@ export async function POST(req: NextRequest) {
         const body = await req.json();
         const { transcript, title, language = 'pl', voice1, voice2 } = body;
 
+        console.log(`[API v1] Incoming generation request: title="${title || 'Untitled'}", language="${language}"`);
+        if (transcript) {
+          console.log(`[API v1] Transcript snippet: ${transcript.trim().substring(0, 100)}...`);
+        }
+
         if (!transcript) {
             return NextResponse.json({ error: 'Transcript is required' }, { status: 400 });
         }
@@ -111,6 +116,16 @@ export async function POST(req: NextRequest) {
             throw new Error('Could not extract conversation from generation');
         }
 
+        console.log(`[API v1] Successfully generated conversation with ${conversation.length} items.`);
+        const totalCharCount = conversation.reduce((acc: number, item: any) => acc + item.text.length, 0);
+        console.log(`[API v1] Total conversation text length: ${totalCharCount} characters.`);
+        
+        console.log("--- GENERATED CONVERSATION START ---");
+        conversation.forEach((item: any, i: number) => {
+          console.log(`${i+1}. ${item.speaker}: ${item.text}`);
+        });
+        console.log("--- GENERATED CONVERSATION END ---");
+        
         // 4. Generate Audio
         const voice1Id = voice1 || 'FF7KdobWPaiR0vkcALHF';
         const voice2Id = voice2 || 'BpjGufoPiobT79j2vtj4';

@@ -80,13 +80,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const isOpenRouterKey = apiKey.startsWith('sk-or-');
+    const isOpenRouterKey = apiKey?.startsWith('sk-or-');
     const openRouterApiKey = process.env.OPENROUTER_API_KEY;
 
     // Use OpenRouter if:
-    // 1. Key starts with 'sk-or-'
-    // 2. OR User is admin/webhook AND admin has OpenRouter env var (or local config says so)
-    const useOpenRouter = isOpenRouterKey || (isAdmin && !userOpenaiApiKey && !!openRouterApiKey);
+    // 1. Key explicitly starts with 'sk-or-'
+    // 2. OR if we have an OPENROUTER_API_KEY env var (Force Gemini as default if set)
+    const useOpenRouter = isOpenRouterKey || !!openRouterApiKey;
 
     let openaiClient;
     const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
     if (useOpenRouter) {
       // Configure OpenRouter (compatible with OpenAI API)
       openaiClient = createOpenAI({
-        apiKey: apiKey,
+        apiKey: openRouterApiKey || apiKey,
         baseURL: 'https://openrouter.ai/api/v1',
       } as any);
     } else {
@@ -213,12 +213,7 @@ SYNTAX AND GRAMMATICAL CORRECTNESS:
 - Double-check that all noun phrases, verb phrases, and sentence structures follow the rules of the target language
 - If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`;
 
-    const defaultPolishEndingPrompt = `CRITICAL - ENDING FOR POLISH PODCASTS:
-At the very end of the conversation, either Antoni or Zofia MUST naturally add a closing statement mentioning the PDF. This should be included as part of the conversation flow, for example:
-- Antoni: "A pamiętajcie, darmowy PDF z naszego podcastu można pobrać w linku pod filmem!"
-- Zofia: "Tak, i pamiętajcie, że darmowy PDF z tego podcastu jest dostępny w linku pod filmem."
-- Antoni: "I jeszcze jedna rzecz - darmowy PDF z naszego podcastu znajdziecie w linku pod filmem!"
-The statement should feel natural and conversational, using the speaker's dialect (Silesian for Antoni, Goral for Zofia). Always include this ending for Polish podcasts.`;
+    const defaultPolishEndingPrompt = ``;
 
     const defaultHostPersonalitiesPolish = `HOST PERSONALITIES:
 Antoni (Male - Energetic & Naive):
@@ -293,8 +288,14 @@ Speaker2 (Female - Pessimistic & Arrogant):
       hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
     }
 
+    console.log(`[Generate Podcast] Request starting: title="${title || 'Article'}", language="${language}"`);
+    console.log(`[Generate Podcast] Models: ${modelName} via ${provider}`);
+    console.log(`[Generate Podcast] Host Personalities Section starts with: ${hostPersonalitiesSection.substring(0, 50)}...`);
+
     let result;
     try {
+      console.log(`[Generate Podcast] Calling LLM with prompt length: ${300 + hostPersonalitiesSection.length + usedMainPrompt.length}...`);
+      
       result = streamObject({
         model,
         schema: podcastSchema,
@@ -312,7 +313,7 @@ ${usedMainPrompt}
 
 ${isPolish ? usedPolishEndingPrompt : ''}
 
-IMPORTANT: Keep the TOTAL conversation under 2500 characters to fit within API limits. Aim for 8-12 short, punchy exchanges that pack maximum impact. Focus on the most interesting or surprising aspects of the content.`,
+IMPORTANT: Make this a natural conversation of about 2.5-3 minutes. Aim for 3000-3500 characters total (STRICT LIMIT — never exceed 4500 chars). Use 12-15 dynamic exchanges. Focus on the most interesting or surprising aspects of the content.`,
       });
     } catch (apiError: any) {
       console.error("API error:", apiError);

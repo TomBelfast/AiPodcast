@@ -221,7 +221,7 @@ export async function composePodcastVideo(args: {
           {
             option: '-vf',
             argument:
-              'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920',
+              'scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,pad=1080:1920:(ow-iw)/2:(oh-ih)/2',
           },
           { option: '-shortest', argument: null },
         ],
@@ -272,7 +272,7 @@ export async function renderPodcastCaptions(args: {
       position: 'bottom_center',
       alignment: 'center',
       bold: true,
-      all_caps: false,
+      all_caps: true,
     },
   };
 

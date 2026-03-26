@@ -1,0 +1,194 @@
+{
+  "source": "elevenlabs",
+  "version": 1,
+  "job_id": "final_fix_1774468057040",
+  "title": "Podcast Finalny Fix",
+  "audio_filename": "podcast_final_fix_1774468057040.mp3",
+  "timestamp": "2026-03-25T19:47:37.040Z",
+  "duration_seconds": 9.102,
+  "full_text": "To jest ostatni test przed oddaniem projektu. Wszystko działa idealnie, od plików MP3 po znormalizowane JSONy.",
+  "speakers": [
+    {
+      "id": "Antoni",
+      "name": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "gender": "male",
+      "personality": "Silesian/Energetic"
+    },
+    {
+      "id": "Zofia",
+      "name": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "gender": "female",
+      "personality": "Goral/Pessimistic"
+    }
+  ],
+  "segments": [
+    {
+      "id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "dialogue_input_index": 0,
+      "start_time": 0,
+      "end_time": 2.952,
+      "text": "To jest ostatni test przed oddaniem projektu."
+    },
+    {
+      "id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "dialogue_input_index": 1,
+      "start_time": 2.952,
+      "end_time": 9.102,
+      "text": "Wszystko działa idealnie, od plików MP3 po znormalizowane JSONy."
+    }
+  ],
+  "words": [
+    {
+      "id": 0,
+      "segment_id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "text": "To",
+      "start_time": 0,
+      "end_time": 0.08
+    },
+    {
+      "id": 1,
+      "segment_id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "text": "jest",
+      "start_time": 0.128,
+      "end_time": 0.32
+    },
+    {
+      "id": 2,
+      "segment_id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "text": "ostatni",
+      "start_time": 0.4,
+      "end_time": 0.88
+    },
+    {
+      "id": 3,
+      "segment_id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "text": "test",
+      "start_time": 0.976,
+      "end_time": 1.36
+    },
+    {
+      "id": 4,
+      "segment_id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "text": "przed",
+      "start_time": 1.4,
+      "end_time": 1.6
+    },
+    {
+      "id": 5,
+      "segment_id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "text": "oddaniem",
+      "start_time": 1.68,
+      "end_time": 2.16
+    },
+    {
+      "id": 6,
+      "segment_id": 0,
+      "speaker": "Antoni",
+      "voice_id": "FF7KdobWPaiR0vkcALHF",
+      "text": "projektu",
+      "start_time": 2.248,
+      "end_time": 2.952
+    },
+    {
+      "id": 7,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "Wszystko",
+      "start_time": 2.952,
+      "end_time": 3.911
+    },
+    {
+      "id": 8,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "działa",
+      "start_time": 3.964,
+      "end_time": 4.23
+    },
+    {
+      "id": 9,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "idealnie",
+      "start_time": 4.323,
+      "end_time": 5.028
+    },
+    {
+      "id": 10,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "od",
+      "start_time": 5.508,
+      "end_time": 5.668
+    },
+    {
+      "id": 11,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "plików",
+      "start_time": 5.721,
+      "end_time": 6.227
+    },
+    {
+      "id": 12,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "MP3",
+      "start_time": 6.36,
+      "end_time": 6.866
+    },
+    {
+      "id": 13,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "po",
+      "start_time": 6.972,
+      "end_time": 7.184
+    },
+    {
+      "id": 14,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "znormalizowane",
+      "start_time": 7.304,
+      "end_time": 8.142
+    },
+    {
+      "id": 15,
+      "segment_id": 1,
+      "speaker": "Zofia",
+      "voice_id": "BpjGufoPiobT79j2vtj4",
+      "text": "JSONy",
+      "start_time": 8.254,
+      "end_time": 8.782
+    }
+  ],
+  "srt": "1\n00:00:00,000 --> 00:00:02,952\nAntoni: To jest ostatni test przed oddaniem projektu.\n\n2\n00:00:02,952 --> 00:00:09,102\nZofia: Wszystko działa idealnie, od plików MP3 po znormalizowane JSONy.\n",
+  "warnings": []
+}
