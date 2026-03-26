@@ -221,7 +221,7 @@ export async function composePodcastVideo(args: {
           {
             option: '-vf',
             argument:
-              'scale=1080:1080:force_original_aspect_ratio=decrease:flags=lanczos,pad=1080:1080:(ow-iw)/2:(oh-ih)/2',
+              'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920',
           },
           { option: '-shortest', argument: null },
         ],
@@ -248,13 +248,20 @@ export async function renderPodcastCaptions(args: {
   videoUrl: string;
   settings: PodcastVideoCaptionSettings;
   srtUrl?: string | null;
-}): Promise<string> {
+  preferExactText?: boolean;
+}): Promise<{
+  url: string;
+  effectiveStyle: string;
+  captionSource: 'provided_srt' | 'auto_transcribe';
+}> {
+  const useProvidedCaptions = Boolean(args.preferExactText !== false && args.srtUrl);
+  const effectiveStyle = useProvidedCaptions ? 'classic' : args.settings.style;
   const payload: Record<string, unknown> = {
     id: `${args.jobId}_caption`,
     video_url: args.videoUrl,
     language: 'auto',
     settings: {
-      style: args.settings.style,
+      style: effectiveStyle,
       line_color: args.settings.line_color,
       word_color: args.settings.word_color,
       outline_color: args.settings.outline_color,
@@ -269,7 +276,7 @@ export async function renderPodcastCaptions(args: {
     },
   };
 
-  if (args.srtUrl && args.settings.style === 'classic') {
+  if (useProvidedCaptions) {
     payload.captions = args.srtUrl;
   }
 
@@ -284,5 +291,9 @@ export async function renderPodcastCaptions(args: {
     throw new Error('NCA caption finished without returning a final MP4 URL.');
   }
 
-  return url;
+  return {
+    url,
+    effectiveStyle,
+    captionSource: useProvidedCaptions ? 'provided_srt' : 'auto_transcribe',
+  };
 }

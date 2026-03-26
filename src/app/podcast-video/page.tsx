@@ -16,6 +16,14 @@ interface ClientJob {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  engineUsed: 'nca' | 'local' | null;
+  renderMode:
+    | 'nca_auto'
+    | 'nca_exact_classic'
+    | 'local_highlight_exact'
+    | 'local_classic_exact'
+    | null;
+  fallbackReason: string | null;
   captionSettings: {
     style: string;
     font_size: number;
@@ -113,6 +121,7 @@ export default function PodcastVideoPage() {
   const [language, setLanguage] = useState('pl');
   const [payloadText, setPayloadText] = useState(defaultScript);
   const [style, setStyle] = useState('highlight');
+  const [exactCaptions, setExactCaptions] = useState(true);
   const [fontSize, setFontSize] = useState('90');
   const [lineColor, setLineColor] = useState('#FFFFFF');
   const [wordColor, setWordColor] = useState('#00FF04');
@@ -181,6 +190,7 @@ export default function PodcastVideoPage() {
       const payload: Record<string, unknown> = {
         title,
         language,
+        exact_captions: exactCaptions,
         style,
         font_size: Number(fontSize),
         line_color: lineColor,
@@ -345,6 +355,31 @@ export default function PodcastVideoPage() {
                 <h2 className="monolith-title">Wygląd Napisów</h2>
               </div>
 
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  padding: '12px 14px',
+                  borderRadius: '12px',
+                  background: 'rgba(255,255,255,0.03)',
+                  border: '1px solid rgba(255,255,255,0.05)',
+                  fontSize: '13px',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={exactCaptions}
+                  onChange={(event) => setExactCaptions(event.target.checked)}
+                />
+                <span>
+                  Użyj oryginalnego transcriptu ElevenLabs 1:1. Dla `highlight` system przełączy się
+                  na lokalny renderer słowo po słowie; gdy transcript nie ma `words[]`, spadnie do
+                  exact `classic`.
+                </span>
+              </label>
+
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '16px' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   <label className="monolith-title" style={{ fontSize: '10px' }}>Styl</label>
@@ -399,6 +434,22 @@ export default function PodcastVideoPage() {
                   />
                 </div>
               </div>
+
+              {!exactCaptions && (
+                <div
+                  style={{
+                    padding: '12px',
+                    borderRadius: '12px',
+                    background: 'rgba(245, 158, 11, 0.08)',
+                    border: '1px solid rgba(245, 158, 11, 0.22)',
+                    fontSize: '12px',
+                    color: '#F6C970',
+                  }}
+                >
+                  Auto-transkrypcja NCA moze roznic sie od oryginalnego tekstu. Wlacz tryb 1:1,
+                  jesli zalezy Ci na idealnej zgodnosci napisow.
+                </div>
+              )}
 
               {error && (
                 <div style={{ 
@@ -553,6 +604,39 @@ export default function PodcastVideoPage() {
                   </div>
                 </div>
 
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                  <div
+                    style={{
+                      padding: '12px',
+                      background: 'rgba(255,255,255,0.03)',
+                      borderRadius: '12px',
+                      border: '1px solid rgba(255,255,255,0.05)',
+                    }}
+                  >
+                    <div className="monolith-title" style={{ fontSize: '10px', marginBottom: '4px' }}>
+                      Silnik Renderu
+                    </div>
+                    <div style={{ fontSize: '13px', fontWeight: 700, color: 'white' }}>
+                      {activeJob.engineUsed || 'pending'}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      padding: '12px',
+                      background: 'rgba(255,255,255,0.03)',
+                      borderRadius: '12px',
+                      border: '1px solid rgba(255,255,255,0.05)',
+                    }}
+                  >
+                    <div className="monolith-title" style={{ fontSize: '10px', marginBottom: '4px' }}>
+                      Tryb
+                    </div>
+                    <div style={{ fontSize: '13px', fontWeight: 700, color: 'white' }}>
+                      {activeJob.renderMode || 'pending'}
+                    </div>
+                  </div>
+                </div>
+
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                     <div className="monolith-title" style={{ fontSize: '10px' }}>Postęp</div>
@@ -585,6 +669,21 @@ export default function PodcastVideoPage() {
                 }}>
                   {activeJob.message}
                 </div>
+
+                {activeJob.fallbackReason && (
+                  <div
+                    style={{
+                      padding: '12px',
+                      background: 'rgba(245, 158, 11, 0.08)',
+                      borderRadius: '12px',
+                      border: '1px solid rgba(245, 158, 11, 0.22)',
+                      fontSize: '12px',
+                      color: '#F6C970',
+                    }}
+                  >
+                    Fallback lokalny: {activeJob.fallbackReason}
+                  </div>
+                )}
 
                 {activeJob.error && (
                   <div className="slab danger" style={{ padding: '12px', fontSize: '12px' }}>
