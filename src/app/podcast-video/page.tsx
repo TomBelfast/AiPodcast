@@ -133,6 +133,7 @@ export default function PodcastVideoPage() {
   const [selectedCoverFile, setSelectedCoverFile] = useState<File | null>(null);
   const [isUploadingCover, setIsUploadingCover] = useState(false);
   const [coverMessage, setCoverMessage] = useState<string | null>(null);
+  const [coverError, setCoverError] = useState<string | null>(null);
 
   const placeholder = useMemo(() => {
     if (inputMode === 'conversation') return defaultConversation;
@@ -244,6 +245,9 @@ export default function PodcastVideoPage() {
 
       const response = await fetch('/api/podcast-video/cover', {
         method: 'POST',
+        headers: {
+          'x-api-key': process.env.NEXT_PUBLIC_APP_API_KEY || '',
+        },
         body: formData,
       });
 
@@ -254,9 +258,9 @@ export default function PodcastVideoPage() {
 
       setCoverVersion(Date.now());
       setSelectedCoverFile(null);
-      setCoverMessage('Cover PNG zostal zaktualizowany.');
+      setCoverMessage('Cover PNG został zaktualizowany.');
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : 'Failed to update cover.');
+      setCoverError(uploadError instanceof Error ? uploadError.message : 'Failed to update cover.');
     } finally {
       setIsUploadingCover(false);
     }
@@ -558,6 +562,21 @@ export default function PodcastVideoPage() {
                     }}
                   >
                     Wybrany plik: {selectedCoverFile.name}
+                  </div>
+                )}
+
+                {coverError && (
+                  <div
+                    style={{
+                      padding: '12px',
+                      background: 'rgba(239, 68, 68, 0.1)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      borderRadius: '12px',
+                      fontSize: '12px',
+                      color: '#ef4444',
+                    }}
+                  >
+                    {coverError}
                   </div>
                 )}
 
