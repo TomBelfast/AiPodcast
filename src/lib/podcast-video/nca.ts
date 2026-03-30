@@ -269,7 +269,7 @@ export async function renderPodcastCaptions(args: {
       max_words_per_line: 4,
       font_size: args.settings.font_size,
       font_family: 'Arial',
-      position: 'bottom_center',
+      position: 'middle_center',
       alignment: 'center',
       bold: true,
       all_caps: true,

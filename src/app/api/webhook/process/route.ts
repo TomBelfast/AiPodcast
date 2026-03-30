@@ -165,7 +165,9 @@ Speaker2 (Female - Pessimistic & Arrogant):
     const result = await streamObject({
       model,
       schema: podcastSchema,
-      prompt: `Convert the following transcript into a natural podcast conversation between two speakers (Speaker1 and Speaker2). 
+      prompt: `IMPORTANT: Make this a VERY SHORT, high-energy podcast of about 1.5-2 minutes. Aim for 1200-1800 characters total (ABSOLUTE MAXIMUM — NEVER EXCEED 2200 chars). Use only 7-9 short and dynamic exchanges. Condense only the most vital points.
+
+Convert the following transcript into a natural podcast conversation between two speakers (Speaker1 and Speaker2). 
       The conversation should be in ${languageName} language.
       Make it engaging, conversational, and natural. Add appropriate pauses, reactions, and dialogue flow.
       All dialogue should be in ${languageName}.
@@ -178,9 +180,7 @@ Speaker2 (Female - Pessimistic & Arrogant):
  Title: ${title || 'Untitled Podcast'}
  Language: ${languageName} (${selectedLanguage})
  
- ${selectedLanguage === 'pl' ? usedPolishEndingPrompt : ''}
- 
- IMPORTANT: Make this a natural conversation of about 2-3 minutes (average 2.5 mins). Aim for 6000-7000 characters total. Use 20-25 dynamic exchanges. Focus on the most interesting or surprising aspects of the content.`,
+ ${selectedLanguage === 'pl' ? usedPolishEndingPrompt : ''}`,
     });
 
     // Collect the full conversation

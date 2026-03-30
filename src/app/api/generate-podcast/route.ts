@@ -296,24 +296,20 @@ Speaker2 (Female - Pessimistic & Arrogant):
     try {
       console.log(`[Generate Podcast] Calling LLM with prompt length: ${300 + hostPersonalitiesSection.length + usedMainPrompt.length}...`);
       
-      result = streamObject({
+      result = await streamObject({
         model,
         schema: podcastSchema,
-        prompt: `Create a highly dynamic, natural podcast conversation between two speakers about the following content. Make it feel like real people having an authentic conversation with interruptions, overlaps, and organic flow.
+        prompt: `IMPORTANT: Make this a VERY SHORT, high-energy podcast of about 1.5-2 minutes. Aim for 1200-1800 characters total (ABSOLUTE MAXIMUM — NEVER EXCEED 2200 chars). Use only 7-9 short and dynamic exchanges. Condense only the most vital points.
 
-IMPORTANT: Generate the conversation in ${languageName} language.
-
+Create a highly dynamic, natural podcast conversation in ${languageName} between Antoni and Zofia based on the provided content.
+      
 Title: ${title || "Article"}
-
 Content: ${content}
 
 ${hostPersonalitiesSection}
+${usedMainPrompt || ''}
 
-${usedMainPrompt}
-
-${isPolish ? usedPolishEndingPrompt : ''}
-
-IMPORTANT: Make this a natural conversation of about 2.5-3 minutes. Aim for 3000-3500 characters total (STRICT LIMIT — never exceed 4500 chars). Use 12-15 dynamic exchanges. Focus on the most interesting or surprising aspects of the content.`,
+${isPolish ? usedPolishEndingPrompt : ''}`,
       });
     } catch (apiError: any) {
       console.error("API error:", apiError);
