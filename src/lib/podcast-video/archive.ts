@@ -14,6 +14,9 @@ export interface PodcastVideoJobPaths {
   audio: string;
   srt: string;
   mp4: string;
+  stem1: string;
+  stem2: string;
+  segmentsDir: string;
 }
 
 export function getPodcastVideoJobPaths(jobId: string): PodcastVideoJobPaths {
@@ -25,6 +28,9 @@ export function getPodcastVideoJobPaths(jobId: string): PodcastVideoJobPaths {
     audio: path.join(dir, 'audio.mp3'),
     srt: path.join(dir, 'captions.srt'),
     mp4: path.join(dir, 'final.mp4'),
+    stem1: path.join(dir, 'stem_speaker1.mp3'),
+    stem2: path.join(dir, 'stem_speaker2.mp3'),
+    segmentsDir: path.join(dir, 'segments'),
   };
 }
 
@@ -70,15 +76,18 @@ export async function writeBufferFile(filePath: string, data: Buffer): Promise<v
 export function buildPodcastVideoFileUrl(
   publicBaseUrl: string,
   jobId: string,
-  type: 'json' | 'mp3' | 'srt' | 'mp4'
+  type: 'json' | 'mp3' | 'srt' | 'mp4' | 'stem1' | 'stem2' | 'segment',
+  segmentName?: string
 ): string {
   const normalizedBase = publicBaseUrl.replace(/\/+$/, '');
-  return `${normalizedBase}/api/podcast-video/jobs/${encodeURIComponent(jobId)}/file?type=${type}`;
+  const url = `${normalizedBase}/api/podcast-video/jobs/${encodeURIComponent(jobId)}/file?type=${type}`;
+  return segmentName ? `${url}&name=${encodeURIComponent(segmentName)}` : url;
 }
 
 export function getArtifactPathByType(
   jobId: string,
-  type: 'json' | 'mp3' | 'srt' | 'mp4'
+  type: 'json' | 'mp3' | 'srt' | 'mp4' | 'stem1' | 'stem2' | 'segment',
+  segmentName?: string
 ): string {
   const paths = getPodcastVideoJobPaths(jobId);
   switch (type) {
@@ -90,10 +99,16 @@ export function getArtifactPathByType(
       return paths.srt;
     case 'mp4':
       return paths.mp4;
+    case 'stem1':
+      return paths.stem1;
+    case 'stem2':
+      return paths.stem2;
+    case 'segment':
+      return path.join(paths.segmentsDir, segmentName || '');
   }
 }
 
-export function getArtifactContentType(type: 'json' | 'mp3' | 'srt' | 'mp4'): string {
+export function getArtifactContentType(type: 'json' | 'mp3' | 'srt' | 'mp4' | 'stem1' | 'stem2' | 'segment'): string {
   switch (type) {
     case 'json':
       return 'application/json; charset=utf-8';
@@ -103,5 +118,9 @@ export function getArtifactContentType(type: 'json' | 'mp3' | 'srt' | 'mp4'): st
       return 'application/x-subrip; charset=utf-8';
     case 'mp4':
       return 'video/mp4';
+    case 'stem1':
+    case 'stem2':
+    case 'segment':
+      return 'audio/mpeg';
   }
 }

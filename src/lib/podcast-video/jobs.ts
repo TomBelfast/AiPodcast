@@ -27,6 +27,9 @@ function getArtifactUrls(publicBaseUrl: string, jobId: string) {
     mp3_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'mp3'),
     srt_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'srt'),
     mp4_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'mp4'),
+    stem_speaker1_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'stem1'),
+    stem_speaker2_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'stem2'),
+    segment_urls: [],
   };
 }
 
@@ -72,6 +75,9 @@ export async function createPodcastVideoJob(args: {
       srt_path: paths.srt,
       mp4_path: paths.mp4,
       status_path: paths.status,
+      stem_speaker1_path: paths.stem1,
+      stem_speaker2_path: paths.stem2,
+      segment_paths: [],
     },
   };
 
@@ -170,14 +176,16 @@ export async function failPodcastVideoJob(
 
 export async function getPodcastVideoJobAvailability(jobId: string) {
   const paths = getPodcastVideoJobPaths(jobId);
-  const [json, mp3, srt, mp4] = await Promise.all([
+  const [json, mp3, srt, mp4, stem1, stem2] = await Promise.all([
     fileExists(paths.transcript),
     fileExists(paths.audio),
     fileExists(paths.srt),
     fileExists(paths.mp4),
+    fileExists(paths.stem1),
+    fileExists(paths.stem2),
   ]);
 
-  return { json, mp3, srt, mp4 };
+  return { json, mp3, srt, mp4, stem1, stem2 };
 }
 
 export function toClientPodcastVideoJob(

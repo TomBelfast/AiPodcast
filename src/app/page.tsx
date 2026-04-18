@@ -288,6 +288,7 @@ export default function Home() {
   const [openaiApiKey, setOpenaiApiKey] = useState<string | undefined>(undefined);
   const [elevenlabsApiKey, setElevenlabsApiKey] = useState<string | undefined>(undefined);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [charactersUsed, setCharactersUsed] = useState<number | null>(null);
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -447,6 +448,7 @@ export default function Home() {
     setHasRequestedAudio(false);
     setHasDownloadedAudio(false);
     setConversationTurns(0);
+    setCharactersUsed(null);
 
     try {
       let content = '';
@@ -611,6 +613,9 @@ export default function Home() {
       }
 
       const audioData = await audioResponse.json();
+      if (audioData.charactersUsed) {
+        setCharactersUsed(audioData.charactersUsed);
+      }
 
       // Revoke previous audio URL to free memory (if it was a blob URL)
       if (audioUrl) {
@@ -793,7 +798,10 @@ export default function Home() {
       }
       return inProgress.label;
     }
-    if (audioUrl) return isPlaying ? 'Playing podcast' : 'Podcast ready';
+    if (audioUrl) {
+      const charInfo = charactersUsed ? ` (Used ${charactersUsed} characters)` : '';
+      return isPlaying ? `Playing podcast${charInfo}` : `Podcast ready${charInfo}`;
+    }
     if (isLoading) return 'Starting…';
     return 'Awaiting URL';
   }, [steps, audioUrl, isLoading, conversationTurns, isPlaying]);

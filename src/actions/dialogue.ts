@@ -8,53 +8,72 @@ export async function createDialogue(
 ): Promise<Result<{
   audioBase64: string;
   processingTimeMs: number;
+  charactersUsed?: number;
   voiceSegments?: VoiceSegment[];
   alignment?: CharacterAlignment;
   normalizedAlignment?: CharacterAlignment;
 }>> {
   const startTime = performance.now();
-  const clientResult = await getElevenLabsClient(request.apiKey);
-  if (!clientResult.ok) return Err(clientResult.error);
+  const apiKey = request.apiKey || process.env.ELEVENLABS_API_KEY;
+  
+  if (!apiKey) {
+    return Err("ElevenLabs API key is missing.");
+  }
 
   try {
-    const client = clientResult.value;
-
     // Prepare the dialogue request according to the API specification
     const dialogueRequest = {
       inputs: request.inputs.map((input) => ({
         text: input.text,
-        voiceId: input.voiceId,
+        voice_id: input.voiceId,
       })),
-      modelId: request.modelId || 'eleven_v3', // Switch back to v3 as per user request
+      model_id: request.modelId || 'eleven_v3',
       ...(request.seed && { seed: request.seed }),
     };
 
-    let audioBase64: string;
-    let voiceSegments: VoiceSegment[] | undefined;
-    let alignment: CharacterAlignment | undefined;
-    let normalizedAlignment: CharacterAlignment | undefined;
+    const endpoint = request.includeTimestamps 
+      ? "https://api.elevenlabs.io/v1/text-to-dialogue/with-timestamps"
+      : "https://api.elevenlabs.io/v1/text-to-dialogue";
 
-    if (request.includeTimestamps) {
-      const response = await client.textToDialogue.convertWithTimestamps(dialogueRequest);
-      audioBase64 = response.audioBase64;
-      voiceSegments = response.voiceSegments;
-      alignment = response.alignment;
-      normalizedAlignment = response.normalizedAlignment;
-    } else {
-      const stream = await client.textToDialogue.convert(dialogueRequest);
-      audioBase64 = await streamToBase64(stream);
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(dialogueRequest)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return Err(`ElevenLabs API error: ${response.status} ${JSON.stringify(errorData)}`);
     }
 
+    const charactersUsed = parseInt(response.headers.get("x-character-count") || "0", 10);
     const processingTimeMs = Math.round(performance.now() - startTime);
 
-    return Ok({
-      audioBase64: audioBase64.startsWith('data:') ? audioBase64 : `data:audio/mpeg;base64,${audioBase64}`,
-      processingTimeMs,
-      voiceSegments,
-      alignment,
-      normalizedAlignment,
-    });
-  } catch (error) {
+    if (request.includeTimestamps) {
+      const data = await response.json();
+      return Ok({
+        audioBase64: data.audio_base64.startsWith('data:') ? data.audio_base64 : `data:audio/mpeg;base64,${data.audio_base64}`,
+        processingTimeMs,
+        charactersUsed,
+        voiceSegments: data.voice_segments,
+        alignment: data.alignment,
+        normalizedAlignment: data.normalized_alignment,
+      });
+    } else {
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      const audioBase64 = buffer.toString('base64');
+      
+      return Ok({
+        audioBase64: `data:audio/mpeg;base64,${audioBase64}`,
+        processingTimeMs,
+        charactersUsed,
+      });
+    }
+  } catch (error: any) {
     return handleError(error, 'dialogue generation');
   }
 }

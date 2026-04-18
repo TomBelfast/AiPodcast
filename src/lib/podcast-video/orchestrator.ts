@@ -1,4 +1,5 @@
 import path from 'path';
+import { promises as fs } from 'fs';
 import { createDialogue } from '@/actions/dialogue';
 import {
   ensurePodcastVideoArchiveDir,
@@ -6,6 +7,7 @@ import {
   writeBufferFile,
   writeJsonFile,
   writeTextFile,
+  buildPodcastVideoFileUrl,
 } from '@/lib/podcast-video/archive';
 import {
   failPodcastVideoJob,
@@ -24,6 +26,10 @@ import {
   type PodcastVideoJobRequest,
   type PodcastVideoRenderMode,
 } from '@/lib/podcast-video/types';
+import {
+  generateStems,
+  generateIndividualSegments,
+} from '@/lib/podcast-video/audio-splitter';
 import {
   type NormalizedTranscript,
   parseElevenLabsTranscript,
@@ -292,12 +298,28 @@ function buildRawMetadata(args: {
     title: args.title,
     speakers: buildSpeakersMetadata(args.conversation, args.speakerVoiceMap),
     conversation: args.conversation,
-    voiceSegments: (args.voiceSegments || []).map((segment: any) => ({
-      ...segment,
-      speaker: reverseSpeakerMap.get(segment.voiceId) || 'Speaker1',
-    })),
-    alignment: args.alignment,
-    normalizedAlignment: args.normalizedAlignment,
+    voiceSegments: (args.voiceSegments || []).map((segment: any) => {
+      const voiceId = segment.voice_id || segment.voiceId;
+      return {
+        voiceId,
+        dialogueInputIndex: segment.dialogue_input_index ?? segment.dialogueInputIndex,
+        startTimeSeconds: segment.start_time_seconds ?? segment.startTimeSeconds,
+        endTimeSeconds: segment.end_time_seconds ?? segment.endTimeSeconds,
+        characterStartIndex: segment.character_start_index ?? segment.characterStartIndex,
+        characterEndIndex: segment.character_end_index ?? segment.characterEndIndex,
+        speaker: reverseSpeakerMap.get(voiceId) || 'Speaker1',
+      };
+    }),
+    alignment: args.alignment ? {
+      characters: args.alignment.characters,
+      characterStartTimesSeconds: args.alignment.character_start_times_seconds ?? args.alignment.characterStartTimesSeconds,
+      characterEndTimesSeconds: args.alignment.character_end_times_seconds ?? args.alignment.characterEndTimesSeconds,
+    } : args.alignment,
+    normalizedAlignment: args.normalizedAlignment ? {
+      characters: args.normalizedAlignment.characters,
+      characterStartTimesSeconds: args.normalizedAlignment.character_start_times_seconds ?? args.normalizedAlignment.characterStartTimesSeconds,
+      characterEndTimesSeconds: args.normalizedAlignment.character_end_times_seconds ?? args.normalizedAlignment.characterEndTimesSeconds,
+    } : args.normalizedAlignment,
     audioFilename: args.audioFilename,
     timestamp: new Date().toISOString(),
   };
@@ -635,6 +657,41 @@ export async function runPodcastVideoJob(
     const paths = await ensurePodcastVideoArchiveDir(jobId);
     const audioBuffer = dataUrlToBuffer(dialogueResult.value.audioBase64);
     await writeBufferFile(paths.audio, audioBuffer);
+    
+    await setPodcastVideoJobStage(
+      jobId,
+      'generating-audio-stems',
+      45,
+      'Generuje osobne sciezki audio (stems) na podstawie znacznikow czasu.'
+    );
+    await generateStems(
+      paths.audio,
+      dialogueResult.value.voiceSegments || [],
+      conversation,
+      speakerVoiceMap,
+      paths.stem1,
+      paths.stem2
+    );
+
+    const segmentFiles = await generateIndividualSegments(
+      paths.audio,
+      dialogueResult.value.voiceSegments || [],
+      conversation,
+      speakerVoiceMap,
+      paths.segmentsDir
+    );
+
+    // Initial update of tracking fields
+    await updatePodcastVideoJob(jobId, {
+      files: {
+        ...job.files,
+        segment_paths: segmentFiles.map(f => path.join(paths.segmentsDir, f)),
+      },
+      artifacts: {
+        ...job.artifacts,
+        segment_urls: segmentFiles.map(f => buildPodcastVideoFileUrl(job.publicBaseUrl, jobId, 'segment', f)),
+      }
+    });
 
     await setPodcastVideoJobStage(
       jobId,
@@ -704,6 +761,30 @@ export async function runPodcastVideoJob(
         `podcast-video/${jobId}/audio.mp3`,
         'audio/mpeg'
       );
+      
+      // Upload stems
+      await uploadFileToMinio(
+        paths.stem1,
+        `podcast-video/${jobId}/stem_speaker1.mp3`,
+        'audio/mpeg'
+      );
+      await uploadFileToMinio(
+        paths.stem2,
+        `podcast-video/${jobId}/stem_speaker2.mp3`,
+        'audio/mpeg'
+      );
+
+      // Upload individual segments
+      const segmentFiles = await fs.readdir(paths.segmentsDir).catch(() => []);
+      for (const fileName of segmentFiles) {
+        if (fileName.endsWith('.mp3')) {
+          await uploadFileToMinio(
+            path.join(paths.segmentsDir, fileName),
+            `podcast-video/${jobId}/segments/${fileName}`,
+            'audio/mpeg'
+          );
+        }
+      }
       const imageUrl = await uploadFileToMinio(
         coverPath,
         `podcast-video/${jobId}/podcast_cover.png`,

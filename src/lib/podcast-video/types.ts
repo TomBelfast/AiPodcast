@@ -7,6 +7,7 @@ export type PodcastVideoStage =
   | 'preparing-input'
   | 'generating-conversation'
   | 'generating-audio'
+  | 'generating-audio-stems'
   | 'building-transcript'
   | 'uploading-assets'
   | 'composing-video'
@@ -49,6 +50,9 @@ export interface PodcastVideoArtifacts {
   mp3_url: string | null;
   srt_url: string | null;
   mp4_url: string | null;
+  stem_speaker1_url: string | null;
+  stem_speaker2_url: string | null;
+  segment_urls: string[] | null;
 }
 
 export type PodcastVideoEngine = 'nca' | 'local' | null;
@@ -66,6 +70,9 @@ export interface PodcastVideoArtifactFiles {
   srt_path: string | null;
   mp4_path: string | null;
   status_path: string | null;
+  stem_speaker1_path: string | null;
+  stem_speaker2_path: string | null;
+  segment_paths: string[] | null;
 }
 
 export interface PodcastVideoJobRecord {
@@ -105,6 +112,6 @@ export const DEFAULT_PODCAST_VIDEO_CAPTION_SETTINGS: PodcastVideoCaptionSettings
 };
 
 export const DEFAULT_PODCAST_VIDEO_VOICES = {
-  voice1: 'FF7KdobWPaiR0vkcALHF',
-  voice2: 'BpjGufoPiobT79j2vtj4',
+  voice1: 'nPczCjzI2devNBz1zQrb',
+  voice2: 'EXAVITQu4vr4xnSDxMaL',
 } as const;

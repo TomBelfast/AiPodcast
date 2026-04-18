@@ -80,6 +80,8 @@ export async function POST(request: NextRequest) {
       conversation: body.inputs.map(i => ({ speaker: '', text: i.text })), // Simplified mapping for TTS-only
     });
 
+    console.log(`[ElevenLabs] Audio generated successfully. Characters used: ${result.value.charactersUsed || 'unknown'}`);
+    
     return NextResponse.json({
       audioBase64: result.value.audioBase64,
       voiceSegments: result.value.voiceSegments,
@@ -87,6 +89,7 @@ export async function POST(request: NextRequest) {
       normalizedAlignment: result.value.normalizedAlignment,
       transcript: parsedTranscript,
       processingTimeMs: result.value.processingTimeMs,
+      charactersUsed: result.value.charactersUsed,
     });
   } catch (error) {
     console.error("Error processing dialogue request:", error);
