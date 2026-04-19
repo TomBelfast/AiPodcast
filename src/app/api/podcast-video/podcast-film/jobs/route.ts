@@ -3,18 +3,39 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { isPodcastVideoAuthorized, resolvePublicBaseUrl } from '@/lib/podcast-video/http';
 import {
   ensurePodcastVideoArchiveDir,
   buildPodcastVideoFileUrl,
   getPodcastVideoJobPaths,
 } from '@/lib/podcast-video/archive';
+import {
+  initStatus,
+  setPhase,
+  markDone,
+  markFailed,
+  readStatus,
+} from '@/lib/podcast-video/job-status';
+
+const OMNIVOICE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
+const WORKER_PROBE_TIMEOUT_MS = 2500;
+const OMNIVOICE_JOB_DISPATCHER = new Agent({
+  headersTimeout: OMNIVOICE_JOB_TIMEOUT_MS,
+  bodyTimeout: OMNIVOICE_JOB_TIMEOUT_MS,
+  connectTimeout: 30 * 1000,
+});
+const WORKER_PROBE_DISPATCHER = new Agent({
+  headersTimeout: WORKER_PROBE_TIMEOUT_MS,
+  bodyTimeout: WORKER_PROBE_TIMEOUT_MS,
+  connectTimeout: WORKER_PROBE_TIMEOUT_MS,
+});
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const OMNIVOICE_BASE_URL =
-  process.env.OMNIVOICE_BASE_URL?.trim() || 'http://192.168.0.13:7001';
+  process.env.OMNIVOICE_BASE_URL?.trim() || 'http://192.168.0.13:8766';
 const SOULX_BASE_URL =
   process.env.SOULX_BASE_URL?.trim() || 'http://192.168.0.13:7000';
 
@@ -27,6 +48,53 @@ type VoiceEntry = {
 };
 type RawBody = Record<string, unknown>;
 type ConversationItem = { speaker: string; text: string };
+type PipelineConfig = {
+  conversation: unknown;
+  transcript: string;
+  language: string;
+  voice1: string;
+  voice2: string;
+  soulxModel: 'pro' | 'lite';
+  useFaceCrop: boolean;
+  imageRotationSeed: number | null;
+  pinnedImages: Record<string, string>;
+  transition: 'none' | 'crossfade';
+  transitionDuration: number;
+  captionsMode: 'off' | 'burn';
+  captionStyle: 'highlight' | 'classic' | 'off';
+  captionFontSize: number;
+  captionWordColor: string;
+  captionLineColor: string;
+  captionOutlineColor: string;
+  captionMarginV: number;
+  captionLanguage: string;
+  title: string;
+};
+type PreparedPipelineInput = {
+  segments: Segment[];
+  voiceRegistry: Map<string, VoiceEntry>;
+  maleVoice: string;
+  femaleVoice: string;
+  voicesSwapped: boolean;
+};
+type WorkerProbeResult = {
+  service: 'omnivoice' | 'soulx';
+  ok: boolean;
+  url: string;
+  detail: string;
+  status?: number;
+};
+
+class PipelineInputError extends Error {
+  status: number;
+  body: Record<string, unknown>;
+
+  constructor(status: number, body: Record<string, unknown>) {
+    super(String(body.error ?? body.detail ?? 'Pipeline input failed.'));
+    this.status = status;
+    this.body = body;
+  }
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -162,8 +230,8 @@ async function generateSegmentsFromRawText(
   transcript: string,
   title: string,
   language: string,
-  voice1: string,
-  voice2: string
+  maleVoice: string,
+  femaleVoice: string
 ): Promise<Segment[]> {
   const response = await fetch(`${getInternalAppBaseUrl()}/api/generate-podcast`, {
     method: 'POST',
@@ -174,6 +242,7 @@ async function generateSegmentsFromRawText(
       content: transcript,
       title,
       language,
+      ttsEngine: 'omnivoice',
     }),
     signal: AbortSignal.timeout(5 * 60 * 1000),
   });
@@ -185,9 +254,205 @@ async function generateSegmentsFromRawText(
 
   const conversation = await parseConversationStream(response);
   return conversation.map((item) => ({
-    speaker: resolveVoiceForSpeaker(item.speaker, voice1, voice2),
+    speaker: resolveVoiceForSpeaker(item.speaker, maleVoice, femaleVoice),
     text: item.text,
   }));
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    const details = [error.message];
+    const errWithCause = error as Error & {
+      cause?: unknown;
+      code?: string;
+      errno?: string | number;
+    };
+    if (errWithCause.code) {
+      details.push(`code=${errWithCause.code}`);
+    }
+    if (errWithCause.errno !== undefined) {
+      details.push(`errno=${String(errWithCause.errno)}`);
+    }
+    if (errWithCause.cause && errWithCause.cause !== error) {
+      details.push(`cause=${describeError(errWithCause.cause)}`);
+    }
+    return details.join(' | ');
+  }
+  return String(error);
+}
+
+async function fetchJsonWithProbe(url: string): Promise<{
+  ok: boolean;
+  status: number;
+  data: unknown;
+  text: string;
+}> {
+  const res = await undiciFetch(url, {
+    method: 'GET',
+    dispatcher: WORKER_PROBE_DISPATCHER,
+    signal: AbortSignal.timeout(WORKER_PROBE_TIMEOUT_MS),
+  });
+  const text = await res.text();
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  return { ok: res.ok, status: res.status, data, text };
+}
+
+async function probeOmniVoiceReadiness(): Promise<WorkerProbeResult> {
+  const healthUrl = `${OMNIVOICE_BASE_URL}/health`;
+  try {
+    const health = await fetchJsonWithProbe(healthUrl);
+    if (!health.ok) {
+      return {
+        service: 'omnivoice',
+        ok: false,
+        url: healthUrl,
+        status: health.status,
+        detail: `health returned HTTP ${health.status}`,
+      };
+    }
+    if (!isPlainObject(health.data) || health.data.ok !== true) {
+      return {
+        service: 'omnivoice',
+        ok: false,
+        url: healthUrl,
+        status: health.status,
+        detail: `health payload missing ok=true: ${health.text.slice(0, 200)}`,
+      };
+    }
+  } catch (error) {
+    return {
+      service: 'omnivoice',
+      ok: false,
+      url: healthUrl,
+      detail: `health request failed: ${describeError(error)}`,
+    };
+  }
+
+  const voicesUrl = `${OMNIVOICE_BASE_URL}/voices`;
+  try {
+    const voices = await fetchJsonWithProbe(voicesUrl);
+    if (!voices.ok) {
+      return {
+        service: 'omnivoice',
+        ok: false,
+        url: voicesUrl,
+        status: voices.status,
+        detail: `voices returned HTTP ${voices.status}`,
+      };
+    }
+    const list = isPlainObject(voices.data) && Array.isArray(voices.data.voices)
+      ? voices.data.voices
+      : null;
+    if (!list || list.length === 0) {
+      return {
+        service: 'omnivoice',
+        ok: false,
+        url: voicesUrl,
+        status: voices.status,
+        detail: 'voices endpoint responded, but returned an empty registry',
+      };
+    }
+    return {
+      service: 'omnivoice',
+      ok: true,
+      url: voicesUrl,
+      status: voices.status,
+      detail: `ready (${list.length} voices visible)`,
+    };
+  } catch (error) {
+    return {
+      service: 'omnivoice',
+      ok: false,
+      url: voicesUrl,
+      detail: `voices request failed: ${describeError(error)}`,
+    };
+  }
+}
+
+async function probeSoulXReadiness(): Promise<WorkerProbeResult> {
+  const candidates = [
+    `${SOULX_BASE_URL}/health`,
+    `${SOULX_BASE_URL}/openapi.json`,
+    `${SOULX_BASE_URL}/`,
+  ];
+
+  const details: string[] = [];
+  for (const url of candidates) {
+    try {
+      const res = await undiciFetch(url, {
+        method: 'GET',
+        dispatcher: WORKER_PROBE_DISPATCHER,
+        signal: AbortSignal.timeout(WORKER_PROBE_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        return {
+          service: 'soulx',
+          ok: true,
+          url,
+          status: res.status,
+          detail: `reachable via ${new URL(url).pathname || '/'}`,
+        };
+      }
+      if (res.status === 404 || res.status === 405) {
+        details.push(`${new URL(url).pathname || '/'} -> HTTP ${res.status}`);
+        continue;
+      }
+      return {
+        service: 'soulx',
+        ok: false,
+        url,
+        status: res.status,
+        detail: `probe returned HTTP ${res.status}`,
+      };
+    } catch (error) {
+      return {
+        service: 'soulx',
+        ok: false,
+        url,
+        detail: `probe failed: ${describeError(error)}`,
+      };
+    }
+  }
+
+  return {
+    service: 'soulx',
+    ok: false,
+    url: candidates[0],
+    detail: `reachable endpoint not found (${details.join('; ')})`,
+  };
+}
+
+async function runWorkerPreflightChecks(): Promise<WorkerProbeResult[]> {
+  return Promise.all([probeOmniVoiceReadiness(), probeSoulXReadiness()]);
+}
+
+function resolveGenderedVoicePair(
+  voice1: string,
+  voice2: string,
+  registry: Map<string, VoiceEntry>
+): { maleVoice: string; femaleVoice: string; swapped: boolean } {
+  const g1 = registry.get(voice1.toLowerCase())?.gender?.toLowerCase() || '';
+  const g2 = registry.get(voice2.toLowerCase())?.gender?.toLowerCase() || '';
+  if (g1 === 'female' && g2 === 'male') {
+    return { maleVoice: voice2, femaleVoice: voice1, swapped: true };
+  }
+  return { maleVoice: voice1, femaleVoice: voice2, swapped: false };
+}
+
+const BRACKETED_TAG_PATTERN = /\[[^\]]*\]/g;
+function stripTtsInlineTags(text: string): string {
+  return text
+    .replace(BRACKETED_TAG_PATTERN, ' ')
+    .replace(/\s*—\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function parseTranscriptToSegments(
@@ -290,6 +555,12 @@ async function fetchBytes(
     buffer: buf,
     contentType: res.headers.get('content-type') || 'application/octet-stream',
   };
+}
+
+function bufferToBlobPart(buffer: Buffer): ArrayBuffer {
+  const bytes = new Uint8Array(buffer.byteLength);
+  bytes.set(buffer);
+  return bytes.buffer;
 }
 
 async function runFfmpeg(args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -612,6 +883,33 @@ const COVER_OVERLAY_W = 1080;
 const COVER_OVERLAY_H = 940;
 const CAPTION_START_DELAY_SECONDS = 0.12;
 
+function wrapTitleText(raw: string, maxCharsPerLine: number): string {
+  const input = raw.replace(/\r\n?/g, '\n');
+  const outLines: string[] = [];
+  for (const paragraph of input.split('\n')) {
+    const words = paragraph.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) {
+      outLines.push('');
+      continue;
+    }
+    let current = '';
+    for (const word of words) {
+      if (!current) {
+        current = word;
+        continue;
+      }
+      if ((current + ' ' + word).length <= maxCharsPerLine) {
+        current += ' ' + word;
+      } else {
+        outLines.push(current);
+        current = word;
+      }
+    }
+    if (current) outLines.push(current);
+  }
+  return outLines.join('\n');
+}
+
 async function compositeOnCover(
   concatMp4: string,
   outputMp4: string,
@@ -620,7 +918,7 @@ async function compositeOnCover(
   const start = Date.now();
   const baseFilter = `[0:v]scale=${COVER_OVERLAY_W}:${COVER_OVERLAY_W}:flags=lanczos,crop=${COVER_OVERLAY_W}:${COVER_OVERLAY_H}:0:${(COVER_OVERLAY_W - COVER_OVERLAY_H) / 2}[fg];[1:v][fg]overlay=0:${COVER_OVERLAY_Y}`;
   const titleFilter = titleTextFile
-    ? `,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile='${titleTextFile}':fontcolor=white:fontsize=64:x=(w-text_w)/2:y=1480:line_spacing=10:box=0:enable='between(t,0,${CAPTION_START_DELAY_SECONDS})'`
+    ? `,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile='${titleTextFile}':fontcolor=0x00FF04:fontsize=64:x=(w-text_w)/2:y=1512-text_h/2:line_spacing=10:box=0:enable='between(t,0,${CAPTION_START_DELAY_SECONDS})'`
     : '';
   const filterComplex = baseFilter + titleFilter;
   await new Promise<void>((resolve, reject) => {
@@ -916,12 +1214,12 @@ async function renderSegmentViaSoulX(args: {
   const fd = new FormData();
   fd.append(
     'image',
-    new Blob([args.imageBuf], { type: args.imageType }),
+    new Blob([bufferToBlobPart(args.imageBuf)], { type: args.imageType }),
     args.imageName
   );
   fd.append(
     'audio',
-    new Blob([args.audioBuf], { type: args.audioType }),
+    new Blob([bufferToBlobPart(args.audioBuf)], { type: args.audioType }),
     args.audioName
   );
   fd.append('model_type', args.modelType);
@@ -937,6 +1235,377 @@ async function renderSegmentViaSoulX(args: {
     );
   }
   return Buffer.from(await res.arrayBuffer());
+}
+
+async function preparePipelineInput(config: Pick<
+  PipelineConfig,
+  'conversation' | 'transcript' | 'title' | 'language' | 'voice1' | 'voice2'
+>): Promise<PreparedPipelineInput> {
+  let voiceRegistry: Map<string, VoiceEntry>;
+  try {
+    voiceRegistry = await fetchVoiceRegistry();
+  } catch (error) {
+    throw new PipelineInputError(502, {
+      error: 'Failed to fetch OmniVoice voice registry.',
+      detail: describeError(error),
+    });
+  }
+
+  const {
+    maleVoice,
+    femaleVoice,
+    swapped: voicesSwapped,
+  } = resolveGenderedVoicePair(config.voice1, config.voice2, voiceRegistry);
+
+  let segments: Segment[] | null = segmentsFromConversation(
+    config.conversation,
+    maleVoice,
+    femaleVoice
+  );
+
+  if (!segments && config.transcript) {
+    segments = parseTranscriptToSegments(config.transcript, config.voice1, config.voice2);
+  }
+
+  if ((!segments || segments.length === 0) && config.transcript) {
+    try {
+      segments = await generateSegmentsFromRawText(
+        config.transcript,
+        config.title || 'Podcast Video',
+        config.language,
+        maleVoice,
+        femaleVoice
+      );
+    } catch (error) {
+      throw new PipelineInputError(502, {
+        error: 'Failed to generate podcast conversation from raw text.',
+        detail: describeError(error),
+      });
+    }
+  }
+
+  if (!segments || segments.length === 0) {
+    throw new PipelineInputError(400, {
+      error:
+        'No segments produced from conversation[], speaker-marked transcript, or raw-text generation.',
+    });
+  }
+
+  segments = segments
+    .map((segment) => ({ ...segment, text: stripTtsInlineTags(segment.text) }))
+    .filter((segment) => segment.text.length > 0);
+
+  if (segments.length === 0) {
+    throw new PipelineInputError(400, {
+      error: 'All segments were empty after TTS sanitization.',
+    });
+  }
+
+  return {
+    segments,
+    voiceRegistry,
+    maleVoice,
+    femaleVoice,
+    voicesSwapped,
+  };
+}
+
+async function runBackgroundPipeline(
+  jobId: string,
+  config: PipelineConfig,
+  publicBaseUrl: string
+): Promise<void> {
+  const paths = await ensurePodcastVideoArchiveDir(jobId);
+  await fs.mkdir(paths.segmentsDir, { recursive: true });
+  const workerUrl = `${OMNIVOICE_BASE_URL}/api/v1/podcast-film/jobs`;
+
+  await setPhase(jobId, 'generate_podcast', 'Preparing dialogue and voices…');
+  const prepared = await preparePipelineInput(config);
+  const {
+    segments,
+    voiceRegistry,
+    maleVoice,
+    femaleVoice,
+    voicesSwapped,
+  } = prepared;
+
+  await setPhase(jobId, 'fetch_voices_images', 'Loading avatar images…');
+  const [womanFiles, menFiles] = await Promise.all([
+    fetchImageList('Woman'),
+    fetchImageList('Men'),
+  ]);
+  const snapshots = new Map<string, string[]>([
+    ['Woman', womanFiles],
+    ['Men', menFiles],
+  ]);
+  const cursors = new Map<string, number>();
+  if (config.imageRotationSeed !== null && Number.isFinite(config.imageRotationSeed)) {
+    const base = Math.max(0, Math.floor(config.imageRotationSeed));
+    cursors.set('Woman', womanFiles.length ? base % womanFiles.length : 0);
+    cursors.set('Men', menFiles.length ? base % menFiles.length : 0);
+  }
+
+  await setPhase(jobId, 'omnivoice_tts', 'Synthesizing voice audio…');
+  const workerStartedAt = Date.now();
+  let workerRes;
+  try {
+    workerRes = await undiciFetch(workerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ script_segments: segments }),
+      signal: AbortSignal.timeout(OMNIVOICE_JOB_TIMEOUT_MS),
+      dispatcher: OMNIVOICE_JOB_DISPATCHER,
+    });
+  } catch (error) {
+    throw new Error(`Failed to reach OmniVoice worker (${workerUrl}): ${describeError(error)}`);
+  }
+  if (!workerRes.ok) {
+    const txt = await workerRes.text();
+    throw new Error(`OmniVoice worker returned ${workerRes.status}: ${txt.slice(0, 500)}`);
+  }
+  const workerData = (await workerRes.json()) as {
+    job_id: string;
+    manifest: {
+      segments: Array<{
+        segment_id: string;
+        speaker: string;
+        audio_file: string;
+        duration_seconds: number;
+        start_time_seconds: number;
+        end_time_seconds: number;
+      }>;
+    };
+  };
+  const workerElapsedMs = Date.now() - workerStartedAt;
+
+  const totalSegs = workerData.manifest.segments.length;
+  await setPhase(jobId, 'soulx_talkhead', `Rendering avatar 0/${totalSegs}…`, {
+    current: 0,
+    total: totalSegs,
+  });
+  const segmentResults: Array<{
+    segment_id: string;
+    voice_id: string;
+    image_folder: string;
+    image_file: string;
+    mp4_file: string;
+    mp4_url: string;
+    duration_seconds: number;
+    actual_duration_seconds: number;
+    text: string;
+    soulx_elapsed_ms: number;
+  }> = [];
+  const renderStartedAt = Date.now();
+  for (let i = 0; i < totalSegs; i++) {
+    const seg = workerData.manifest.segments[i];
+    const voice = voiceRegistry.get(seg.speaker.toLowerCase());
+    if (!voice) {
+      throw new Error(
+        `Voice "${seg.speaker}" from OmniVoice manifest not found in /voices registry`
+      );
+    }
+    const { folder, file } = pickImage(voice, cursors, snapshots, config.pinnedImages);
+    const imageUrl = `${OMNIVOICE_BASE_URL}/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
+    const audioUrl = `${OMNIVOICE_BASE_URL}/api/v1/podcast-film/jobs/${encodeURIComponent(workerData.job_id)}/file?type=segment&name=${encodeURIComponent(seg.audio_file)}`;
+    const [img, aud] = await Promise.all([fetchBytes(imageUrl), fetchBytes(audioUrl)]);
+    const soulxStart = Date.now();
+    const mp4Buf = await renderSegmentViaSoulX({
+      imageBuf: img.buffer,
+      imageName: file,
+      imageType: img.contentType,
+      audioBuf: aud.buffer,
+      audioName: seg.audio_file,
+      audioType: aud.contentType,
+      modelType: config.soulxModel,
+      useFaceCrop: config.useFaceCrop,
+    });
+    const soulxElapsed = Date.now() - soulxStart;
+    const mp4Name = `segment_${String(i + 1).padStart(4, '0')}.mp4`;
+    const mp4Path = path.join(paths.segmentsDir, mp4Name);
+    await fs.writeFile(mp4Path, mp4Buf);
+    const actualDuration = await probeDurationSeconds(mp4Path);
+    segmentResults.push({
+      segment_id: seg.segment_id,
+      voice_id: seg.speaker,
+      image_folder: folder,
+      image_file: file,
+      mp4_file: mp4Name,
+      mp4_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'segment', mp4Name),
+      duration_seconds: seg.duration_seconds,
+      actual_duration_seconds: actualDuration,
+      text: segments[i].text,
+      soulx_elapsed_ms: soulxElapsed,
+    });
+    await setPhase(jobId, 'soulx_talkhead', `Rendering avatar ${i + 1}/${totalSegs}…`, {
+      current: i + 1,
+      total: totalSegs,
+    });
+  }
+  const renderElapsedMs = Date.now() - renderStartedAt;
+
+  await setPhase(jobId, 'concat', 'Combining segments and overlaying cover…');
+  const finalMp4Path = getPodcastVideoJobPaths(jobId).mp4;
+  const concatMp4Path = path.join(paths.dir, 'concat_512.mp4');
+  const concatResult = await concatSegmentsToMp4(
+    paths.segmentsDir,
+    segmentResults.map((segment) => segment.mp4_file),
+    concatMp4Path,
+    { transition: config.transition, transitionDuration: config.transitionDuration }
+  );
+  const finalMp4Url = buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'mp4');
+  const compositeStart = Date.now();
+  const compositeMp4Path = path.join(paths.dir, 'composite_1080.mp4');
+  let titleTextFile: string | null = null;
+  if (config.title) {
+    titleTextFile = path.join(paths.dir, 'title.txt');
+    await fs.writeFile(titleTextFile, wrapTitleText(config.title, 28), 'utf8');
+  }
+  await compositeOnCover(concatMp4Path, compositeMp4Path, titleTextFile);
+  const compositeElapsedMs = Date.now() - compositeStart;
+  await fs.rename(compositeMp4Path, finalMp4Path);
+
+  const srtBody = buildSrtFromSegments(
+    segmentResults.map((segment) => ({
+      text: segment.text,
+      duration_seconds: segment.actual_duration_seconds,
+    })),
+    CAPTION_START_DELAY_SECONDS
+  );
+  const srtPath = getPodcastVideoJobPaths(jobId).srt;
+  await fs.writeFile(srtPath, srtBody, 'utf8');
+  const srtUrl = buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'srt');
+
+  let captionsElapsedMs: number | undefined;
+  const captionWarnings: string[] = [];
+  let matchedTotal = 0;
+  let unmatchedTotal = 0;
+  const globalTokens: DisplayToken[] = [];
+  if (config.captionsMode === 'burn' && config.captionStyle !== 'off') {
+    await setPhase(jobId, 'whisper_align', `Aligning word timing 0/${segmentResults.length}…`, {
+      current: 0,
+      total: segmentResults.length,
+    });
+    let cumulativeOffset = 0;
+    let idCursor = 0;
+    for (let i = 0; i < segmentResults.length; i++) {
+      const segment = segmentResults[i];
+      const manifestSeg = workerData.manifest.segments[i];
+      const segDuration = segment.actual_duration_seconds;
+      const segStart = cumulativeOffset;
+      const segEnd = cumulativeOffset + segDuration;
+      let whisperWords: WhisperWord[] = [];
+      try {
+        whisperWords = await transcribeSegmentWords(
+          workerData.job_id,
+          manifestSeg.audio_file,
+          config.captionLanguage
+        );
+      } catch (error) {
+        captionWarnings.push(
+          `transcribe-words failed for ${manifestSeg.audio_file}: ${describeError(error).slice(0, 160)}`
+        );
+      }
+      const { tokens, matched, unmatched } = matchScriptToWhisperWords(
+        segment.text,
+        whisperWords,
+        segStart,
+        segEnd,
+        i,
+        idCursor
+      );
+      matchedTotal += matched;
+      unmatchedTotal += unmatched;
+      idCursor += tokens.length;
+      globalTokens.push(...tokens);
+      cumulativeOffset = segEnd;
+      await setPhase(
+        jobId,
+        'whisper_align',
+        `Aligning word timing ${i + 1}/${segmentResults.length}…`,
+        {
+          current: i + 1,
+          total: segmentResults.length,
+        }
+      );
+    }
+    for (const tok of globalTokens) {
+      tok.startTime += CAPTION_START_DELAY_SECONDS;
+      tok.endTime += CAPTION_START_DELAY_SECONDS;
+    }
+    const style: CaptionStyle = {
+      fontSize: config.captionFontSize,
+      lineColor: config.captionLineColor,
+      wordColor: config.captionWordColor,
+      outlineColor: config.captionOutlineColor,
+      marginV: config.captionMarginV,
+      marginX: 40,
+      playResX: 1080,
+      playResY: 1920,
+      fontName: 'DejaVu Sans',
+      visibleWords: 2,
+    };
+    const assContent =
+      config.captionStyle === 'highlight'
+        ? buildHighlightAss(globalTokens, style)
+        : buildClassicAss(globalTokens, style);
+    const assPath = path.join(paths.dir, 'captions.ass');
+    await fs.writeFile(assPath, assContent, 'utf8');
+    if (globalTokens.length > 0) {
+      await setPhase(jobId, 'burn_subs', 'Burning captions into video…');
+      const tmpMp4 = path.join(paths.dir, 'final_captioned.mp4');
+      const result = await burnAssOntoMp4(paths.dir, finalMp4Path, 'captions.ass', tmpMp4);
+      captionsElapsedMs = result.elapsed_ms;
+      await fs.rename(tmpMp4, finalMp4Path);
+    } else {
+      captionWarnings.push('no caption tokens produced — skipping burn');
+    }
+  }
+
+  await markDone(jobId, {
+    success: true,
+    pipeline: 'podcast-film-v1',
+    tts_engine: 'omnivoice',
+    soulx_model: config.soulxModel,
+    use_face_crop: config.useFaceCrop,
+    image_rotation_seed: config.imageRotationSeed,
+    job_id: jobId,
+    omnivoice_job_id: workerData.job_id,
+    voice1: config.voice1,
+    voice2: config.voice2,
+    male_voice: maleVoice,
+    female_voice: femaleVoice,
+    voices_swapped_for_gender: voicesSwapped,
+    segments_count: segmentResults.length,
+    segments: segmentResults,
+    mp4_url: finalMp4Url,
+    srt_url: srtUrl,
+    captions: config.captionsMode,
+    caption_style: config.captionStyle,
+    caption_font_size: config.captionFontSize,
+    caption_margin_v: config.captionMarginV,
+    caption_word_color: config.captionWordColor,
+    caption_line_color: config.captionLineColor,
+    caption_warnings: captionWarnings,
+    caption_matched_words: matchedTotal,
+    caption_unmatched_words: unmatchedTotal,
+    transition: config.transition,
+    transition_duration: config.transitionDuration,
+    transition_skipped_reason: concatResult.transition_skipped_reason,
+    final_duration_seconds: concatResult.final_duration_seconds,
+    timings: {
+      omnivoice_ms: workerElapsedMs,
+      soulx_total_ms: renderElapsedMs,
+      concat_ms: concatResult.elapsed_ms,
+      concat_mode: concatResult.mode,
+      composite_ms: compositeElapsedMs,
+      captions_ms: captionsElapsedMs,
+    },
+    worker: {
+      omnivoice_url: workerUrl,
+      soulx_url: `${SOULX_BASE_URL}/generate`,
+    },
+    note: 'v1: per-segment MP4 + concat + word-level ASS captions burned via Whisper timing reconciliation.',
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -964,12 +1633,13 @@ export async function POST(request: NextRequest) {
     }
 
     const transcript = String(body.transcript || body.script_text || '').trim();
+    const normalizedConversation = normalizeConversationItems(body.conversation);
     const language = String(body.language || body.caption_language || 'pl').trim() || 'pl';
     const voice1 = String(body.voice1 || 'host_a');
     const voice2 = String(body.voice2 || 'host_b');
     const dryRun = Boolean(body.dry_run ?? body.dryRun ?? false);
-    const soulxModelRaw = String(body.soulx_model || 'lite').toLowerCase();
-    const soulxModel: 'pro' | 'lite' = soulxModelRaw === 'pro' ? 'pro' : 'lite';
+    const soulxModelRaw = String(body.soulx_model || 'pro').toLowerCase();
+    const soulxModel: 'pro' | 'lite' = soulxModelRaw === 'lite' ? 'lite' : 'pro';
     const useFaceCrop = body.use_face_crop === undefined ? true : Boolean(body.use_face_crop);
     const imageRotationSeedRaw = body.image_rotation_seed;
     const imageRotationSeed =
@@ -1008,34 +1678,7 @@ export async function POST(request: NextRequest) {
     const captionLanguage = String(body.caption_language ?? 'pl');
     const title = typeof body.title === 'string' ? body.title.trim() : '';
 
-    let segments: Segment[] | null = segmentsFromConversation(
-      body.conversation,
-      voice1,
-      voice2
-    );
-    if (!segments && transcript) {
-      segments = parseTranscriptToSegments(transcript, voice1, voice2);
-    }
-    if ((!segments || segments.length === 0) && transcript) {
-      try {
-        segments = await generateSegmentsFromRawText(
-          transcript,
-          title || 'Podcast Video',
-          language,
-          voice1,
-          voice2
-        );
-      } catch (error) {
-        return NextResponse.json(
-          {
-            error: 'Failed to generate podcast conversation from raw text.',
-            detail: error instanceof Error ? error.message : String(error),
-          },
-          { status: 502 }
-        );
-      }
-    }
-    if (!segments || segments.length === 0) {
+    if (normalizedConversation.length === 0 && !transcript) {
       return NextResponse.json(
         {
           error:
@@ -1045,323 +1688,120 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (dryRun) {
-      return NextResponse.json({
-        success: true,
-        pipeline: 'podcast-film-v1',
-        dry_run: true,
-        segments_count: segments.length,
-        soulx_model: soulxModel,
-        use_face_crop: useFaceCrop,
-      });
-    }
-
-    // 1. OmniVoice worker — TTS
-    const workerStartedAt = Date.now();
-    const workerUrl = `${OMNIVOICE_BASE_URL}/api/v1/podcast-film/jobs`;
-    let workerRes: Response;
-    try {
-      workerRes = await fetch(workerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        body: JSON.stringify({ script_segments: segments }),
-      });
-    } catch (err) {
-      return NextResponse.json(
-        {
-          error: 'Failed to reach OmniVoice worker.',
-          worker_url: workerUrl,
-          detail: String(err),
-        },
-        { status: 502 }
-      );
-    }
-    if (!workerRes.ok) {
-      const txt = await workerRes.text();
-      return NextResponse.json(
-        {
-          error: 'OmniVoice worker returned non-2xx.',
-          worker_url: workerUrl,
-          worker_status: workerRes.status,
-          worker_body: txt.slice(0, 500),
-        },
-        { status: 502 }
-      );
-    }
-    const workerData = (await workerRes.json()) as {
-      job_id: string;
-      manifest: {
-        segments: Array<{
-          segment_id: string;
-          speaker: string;
-          audio_file: string;
-          duration_seconds: number;
-          start_time_seconds: number;
-          end_time_seconds: number;
-        }>;
-      };
-    };
-    const workerElapsedMs = Date.now() - workerStartedAt;
-
-    // 2. Voice registry + image snapshots
-    const [voiceRegistry, womanFiles, menFiles] = await Promise.all([
-      fetchVoiceRegistry(),
-      fetchImageList('Woman'),
-      fetchImageList('Men'),
-    ]);
-    const snapshots = new Map<string, string[]>([
-      ['Woman', womanFiles],
-      ['Men', menFiles],
-    ]);
-    const cursors = new Map<string, number>();
-    if (imageRotationSeed !== null && Number.isFinite(imageRotationSeed)) {
-      const base = Math.max(0, Math.floor(imageRotationSeed));
-      cursors.set('Woman', womanFiles.length ? base % womanFiles.length : 0);
-      cursors.set('Men', menFiles.length ? base % menFiles.length : 0);
-    }
-
-    // 3. Job dir + segments subdir
-    const jobId = `pbfilm_${randomUUID().replace(/-/g, '')}`;
-    const paths = await ensurePodcastVideoArchiveDir(jobId);
-    await fs.mkdir(paths.segmentsDir, { recursive: true });
-
-    // 4. Per-segment render
-    const publicBaseUrl = resolvePublicBaseUrl(request);
-    const segmentResults: Array<{
-      segment_id: string;
-      voice_id: string;
-      image_folder: string;
-      image_file: string;
-      mp4_file: string;
-      mp4_url: string;
-      duration_seconds: number;
-      actual_duration_seconds: number;
-      text: string;
-      soulx_elapsed_ms: number;
-    }> = [];
-
-    const renderStartedAt = Date.now();
-    for (let i = 0; i < workerData.manifest.segments.length; i++) {
-      const seg = workerData.manifest.segments[i];
-      const voice = voiceRegistry.get(seg.speaker.toLowerCase());
-      if (!voice) {
-        throw new Error(
-          `Voice "${seg.speaker}" from OmniVoice manifest not found in /voices registry`
-        );
-      }
-
-      const { folder, file } = pickImage(voice, cursors, snapshots, pinnedImages);
-
-      const imageUrl = `${OMNIVOICE_BASE_URL}/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
-      const audioUrl = `${OMNIVOICE_BASE_URL}/api/v1/podcast-film/jobs/${encodeURIComponent(workerData.job_id)}/file?type=segment&name=${encodeURIComponent(seg.audio_file)}`;
-
-      const [img, aud] = await Promise.all([
-        fetchBytes(imageUrl),
-        fetchBytes(audioUrl),
-      ]);
-
-      const soulxStart = Date.now();
-      const mp4Buf = await renderSegmentViaSoulX({
-        imageBuf: img.buffer,
-        imageName: file,
-        imageType: img.contentType,
-        audioBuf: aud.buffer,
-        audioName: seg.audio_file,
-        audioType: aud.contentType,
-        modelType: soulxModel,
-        useFaceCrop,
-      });
-      const soulxElapsed = Date.now() - soulxStart;
-
-      const mp4Name = `segment_${String(i + 1).padStart(4, '0')}.mp4`;
-      const mp4Path = path.join(paths.segmentsDir, mp4Name);
-      await fs.writeFile(mp4Path, mp4Buf);
-      const actualDuration = await probeDurationSeconds(mp4Path);
-
-      segmentResults.push({
-        segment_id: seg.segment_id,
-        voice_id: seg.speaker,
-        image_folder: folder,
-        image_file: file,
-        mp4_file: mp4Name,
-        mp4_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'segment', mp4Name),
-        duration_seconds: seg.duration_seconds,
-        actual_duration_seconds: actualDuration,
-        text: segments[i].text,
-        soulx_elapsed_ms: soulxElapsed,
-      });
-    }
-    const renderElapsedMs = Date.now() - renderStartedAt;
-
-    // 5. ffmpeg concat segments (512x512 intermediate)
-    const finalMp4Path = getPodcastVideoJobPaths(jobId).mp4;
-    const concatMp4Path = path.join(paths.dir, 'concat_512.mp4');
-    const concatResult = await concatSegmentsToMp4(
-      paths.segmentsDir,
-      segmentResults.map((s) => s.mp4_file),
-      concatMp4Path,
-      { transition, transitionDuration }
-    );
-    const finalMp4Url = buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'mp4');
-
-    // 5.5. Composite 512x512 body onto 1080x1920 branded cover
-    const compositeStart = Date.now();
-    const compositeMp4Path = path.join(paths.dir, 'composite_1080.mp4');
-    let titleTextFile: string | null = null;
-    if (title) {
-      titleTextFile = path.join(paths.dir, 'title.txt');
-      await fs.writeFile(titleTextFile, title, 'utf8');
-    }
-    await compositeOnCover(concatMp4Path, compositeMp4Path, titleTextFile);
-    const compositeElapsedMs = Date.now() - compositeStart;
-    // captions burn expects body at finalMp4Path; rename composite there
-    await fs.rename(compositeMp4Path, finalMp4Path);
-
-    // 6. SRT from actual per-segment MP4 durations (cumulative)
-    const srtBody = buildSrtFromSegments(
-      segmentResults.map((s) => ({
-        text: s.text,
-        duration_seconds: s.actual_duration_seconds,
-      })),
-      CAPTION_START_DELAY_SECONDS
-    );
-    const srtPath = getPodcastVideoJobPaths(jobId).srt;
-    await fs.writeFile(srtPath, srtBody, 'utf8');
-    const srtUrl = buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'srt');
-
-    // 7. Whisper-aligned word-level ASS captions + burn
-    let captionsElapsedMs: number | undefined;
-    const captionWarnings: string[] = [];
-    let matchedTotal = 0;
-    let unmatchedTotal = 0;
-    const globalTokens: DisplayToken[] = [];
-
-    if (captionsMode === 'burn' && captionStyle !== 'off') {
-      let cumulativeOffset = 0;
-      let idCursor = 0;
-
-      for (let i = 0; i < segmentResults.length; i++) {
-        const seg = segmentResults[i];
-        const manifestSeg = workerData.manifest.segments[i];
-        const segDuration = seg.actual_duration_seconds;
-        const segStart = cumulativeOffset;
-        const segEnd = cumulativeOffset + segDuration;
-
-        let whisperWords: WhisperWord[] = [];
-        try {
-          whisperWords = await transcribeSegmentWords(
-            workerData.job_id,
-            manifestSeg.audio_file,
-            captionLanguage
-          );
-        } catch (err) {
-          captionWarnings.push(
-            `transcribe-words failed for ${manifestSeg.audio_file}: ${String(err).slice(0, 160)}`
-          );
-        }
-
-        const { tokens, matched, unmatched } = matchScriptToWhisperWords(
-          seg.text,
-          whisperWords,
-          segStart,
-          segEnd,
-          i,
-          idCursor
-        );
-        matchedTotal += matched;
-        unmatchedTotal += unmatched;
-        idCursor += tokens.length;
-        globalTokens.push(...tokens);
-
-        cumulativeOffset = segEnd;
-      }
-
-      for (const tok of globalTokens) {
-        tok.startTime += CAPTION_START_DELAY_SECONDS;
-        tok.endTime += CAPTION_START_DELAY_SECONDS;
-      }
-
-      const style: CaptionStyle = {
-        fontSize: captionFontSize,
-        lineColor: captionLineColor,
-        wordColor: captionWordColor,
-        outlineColor: captionOutlineColor,
-        marginV: captionMarginV,
-        marginX: 40,
-        playResX: 1080,
-        playResY: 1920,
-        fontName: 'DejaVu Sans',
-        visibleWords: 2,
-      };
-
-      const assContent =
-        captionStyle === 'highlight'
-          ? buildHighlightAss(globalTokens, style)
-          : buildClassicAss(globalTokens, style);
-      const assPath = path.join(paths.dir, 'captions.ass');
-      await fs.writeFile(assPath, assContent, 'utf8');
-
-      if (globalTokens.length > 0) {
-        const tmpMp4 = path.join(paths.dir, 'final_captioned.mp4');
-        const result = await burnAssOntoMp4(
-          paths.dir,
-          finalMp4Path,
-          'captions.ass',
-          tmpMp4
-        );
-        captionsElapsedMs = result.elapsed_ms;
-        await fs.rename(tmpMp4, finalMp4Path);
-      } else {
-        captionWarnings.push('no caption tokens produced — skipping burn');
-      }
-    }
-
-    return NextResponse.json({
-      success: true,
-      pipeline: 'podcast-film-v1',
-      tts_engine: 'omnivoice',
-      soulx_model: soulxModel,
-      use_face_crop: useFaceCrop,
-      image_rotation_seed: imageRotationSeed,
-      job_id: jobId,
-      omnivoice_job_id: workerData.job_id,
+    const config: PipelineConfig = {
+      conversation: normalizedConversation.length > 0 ? normalizedConversation : body.conversation,
+      transcript,
+      language,
       voice1,
       voice2,
-      segments_count: segmentResults.length,
-      segments: segmentResults,
-      mp4_url: finalMp4Url,
-      srt_url: srtUrl,
-      captions: captionsMode,
-      caption_style: captionStyle,
-      caption_font_size: captionFontSize,
-      caption_margin_v: captionMarginV,
-      caption_word_color: captionWordColor,
-      caption_line_color: captionLineColor,
-      caption_warnings: captionWarnings,
-      caption_matched_words: matchedTotal,
-      caption_unmatched_words: unmatchedTotal,
+      soulxModel,
+      useFaceCrop,
+      imageRotationSeed,
+      pinnedImages,
       transition,
-      transition_duration: transitionDuration,
-      transition_skipped_reason: concatResult.transition_skipped_reason,
-      final_duration_seconds: concatResult.final_duration_seconds,
-      timings: {
-        omnivoice_ms: workerElapsedMs,
-        soulx_total_ms: renderElapsedMs,
-        concat_ms: concatResult.elapsed_ms,
-        concat_mode: concatResult.mode,
-        composite_ms: compositeElapsedMs,
-        captions_ms: captionsElapsedMs,
-      },
-      worker: {
-        omnivoice_url: workerUrl,
-        soulx_url: `${SOULX_BASE_URL}/generate`,
-      },
-      note: 'v1: per-segment MP4 + concat + word-level ASS captions burned via Whisper timing reconciliation.',
-    });
-  } catch (error) {
-    console.error('[podcast-film] job failed:', error);
+      transitionDuration,
+      captionsMode,
+      captionStyle,
+      captionFontSize,
+      captionWordColor,
+      captionLineColor,
+      captionOutlineColor,
+      captionMarginV,
+      captionLanguage,
+      title,
+    };
+
+    if (dryRun) {
+      try {
+        const prepared = await preparePipelineInput(config);
+        return NextResponse.json({
+          success: true,
+          pipeline: 'podcast-film-v1',
+          dry_run: true,
+          segments_count: prepared.segments.length,
+          soulx_model: soulxModel,
+          use_face_crop: useFaceCrop,
+          voice1,
+          voice2,
+          male_voice: prepared.maleVoice,
+          female_voice: prepared.femaleVoice,
+          voices_swapped_for_gender: prepared.voicesSwapped,
+          segments_preview: prepared.segments.map((segment) => ({
+            voice_id: segment.speaker,
+            text: segment.text,
+          })),
+        });
+      } catch (error) {
+        if (error instanceof PipelineInputError) {
+          return NextResponse.json(error.body, { status: error.status });
+        }
+        return NextResponse.json(
+          {
+            error: 'Pipeline B dry-run failed.',
+            detail: describeError(error),
+          },
+          { status: 500 }
+        );
+      }
+    }
+
+    const workerChecks = await runWorkerPreflightChecks();
+    const failedWorkerChecks = workerChecks.filter((check) => !check.ok);
+    if (failedWorkerChecks.length > 0) {
+      const detail = failedWorkerChecks
+        .map((check) => `${check.service}: ${check.detail}`)
+        .join(' | ');
+      return NextResponse.json(
+        {
+          error: 'Podcast-film worker preflight failed.',
+          detail,
+          checks: workerChecks,
+        },
+        { status: 503 }
+      );
+    }
+
+    const jobId = `pbfilm_${randomUUID().replace(/-/g, '')}`;
+    await initStatus(jobId);
+    const publicBaseUrl = resolvePublicBaseUrl(request);
+
+    void (async () => {
+      try {
+        await runBackgroundPipeline(jobId, config, publicBaseUrl);
+      } catch (error) {
+        console.error(`[podcast-film] job ${jobId} failed:`, error);
+        const cur = await readStatus(jobId);
+        if (error instanceof PipelineInputError) {
+          await markFailed(
+            jobId,
+            String(error.body.detail ?? error.body.error ?? error.message),
+            cur?.phase ?? null
+          );
+          return;
+        }
+        await markFailed(jobId, describeError(error), cur?.phase ?? null);
+      }
+    })();
+
     return NextResponse.json(
-      { error: 'Pipeline B job failed.', detail: String(error) },
+      {
+        success: true,
+        pipeline: 'podcast-film-v1',
+        tts_engine: 'omnivoice',
+        soulx_model: soulxModel,
+        use_face_crop: useFaceCrop,
+        image_rotation_seed: imageRotationSeed,
+        job_id: jobId,
+        status_url: `${publicBaseUrl}/api/podcast-video/podcast-film/jobs/${jobId}/status`,
+        voice1,
+        voice2,
+      },
+      { status: 202 }
+    );
+  } catch (error) {
+    console.error('[podcast-film] job setup failed:', error);
+    return NextResponse.json(
+      { error: 'Pipeline B job setup failed.', detail: String(error) },
       { status: 500 }
     );
   }

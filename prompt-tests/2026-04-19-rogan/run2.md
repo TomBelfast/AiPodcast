@@ -1,0 +1,26 @@
+# Rogan-style run 2
+
+**Model:** google/gemini-3.1-pro-preview
+**Prompt:** v3 (Rogan-style + TOP PRIORITY + twardy codzienny element + limit 160zn)
+
+---
+
+1. **[Antoni]** (171 zn) Jo ci godom, Zofia, to jest coś niesamowitego, bo wypuścili tego nowego Claude cztery kropka siedem. Tyn model aż trzy razy lepij widzi obrazki i robi takie gryfne rzeczy.
+
+2. **[Zofia]** (226 zn) Oj Antoni, ty sie zawse podniecos, a przecie to jesce nie wsyćko, bo oni ukrywajom tyz ten wielki, sekretny model o nazwie Mythos. Ja tam od razu wiedziałam, ze z obawy o naduzycia nie dadzom nom tego potęznego oprogramowania.
+
+3. **[Antoni]** (215 zn) Ale przeca ta nowa wersja cztery kropka siedem sama ci zrobi całom strona internetowo ino ze słów nagodanych. Chopy z wielkich firm testujom te nowe funkcje zwane routines i wszystko w chmurze samo sie bydzie robić.
+
+4. **[Zofia]** (233 zn) Za to wiadomo od razu, ze nowe instrukcje w modelu som straśnie dosłowne i stare aplikacje bez aktualizacji przestanom działac. Widziałeś w ogóle, ze giełda oprogramowania leci na pysk i wszyscy programiści bojom sie o swojom robote.
+
+5. **[Antoni]** (224 zn) Kaj tam stracom przeca ta robota, jo żech pomyśloł, że tyn sztuczny mózg nom sam ino życie ułatwi i bydymy mieć wiyncyj fajnego czasu. Przecież chopy z firmy godali, że to mo o kilkanaście procent lepsze wyniki inżynieryjne.
+
+6. **[Zofia]** (204 zn) Ciesys sie jak radosne dziecko, a goworzom tyz, ze sztuczna inteligencja wypiera ludzi, a klasyczne narzędzia kompletnie przepadnom. Ja juz ci nieroz godałam, zebyś nie był taki ufny w te cyfrowe nowości.
+
+7. **[Antoni]** (217 zn) Jo bym tam i tak fest spróbowoł tego całego ulepszonego Mythosa, gdyby mi go ino dali na mojim ekranie. Nie pojmuja, czymu ty, Zofia, jesteś tako strasznie na nie, skoro dookoła słyszałaś, że to jest wielko rewolucja.
+
+8. **[Zofia]** (216 zn) Bo ja tyz w żadnom chmure za diabła nie wierze i dobrze sama wiedziałam, jak to sie syćko źle końcy, hej. Posiedziałbyś wreszcie troche nad uczciwom robotom, zamiast pleść mi tu dzisiej o tych komputerowych cudokach.
+
+---
+
+**Total:** 8 wymian, 1706 zn

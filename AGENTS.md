@@ -9,8 +9,8 @@ Keep this file small. Store only durable facts and high-signal working conventio
 - Pipeline A (`/api/podcast-video/jobs`) is the existing Static Video flow and must remain working.
 - Pipeline B (`/api/podcast-video/podcast-film/jobs`) already exists in this repo and currently does:
   - parse transcript / conversation into segments
-  - fetch OmniVoice voice registry from `.13:7001 /voices`
-  - call `.13:7001 /api/v1/podcast-film/jobs`
+  - fetch OmniVoice voice registry from `.13:8766 /voices`
+  - call `.13:8766 /api/v1/podcast-film/jobs`
   - call SoulX `.13:7000 /generate` per segment
   - concat MP4 segments with hard cut by default
   - generate `captions.srt`
@@ -22,7 +22,9 @@ Keep this file small. Store only durable facts and high-signal working conventio
   - it preserves dialect wording and does not use Whisper output as subtitle text
 - Live smoke on 2026-04-18 produced correct original-text SRT with `caption_matched_words = 41` and `caption_unmatched_words = 2`.
 - OmniVoice voice registry is folder-based in `C:\APLIKACJE\OmniVoice\personalized-podcast\voice_samples\`.
-- Current worker base URLs on `.13`: OmniVoice `http://192.168.0.13:7001`, SoulX `http://192.168.0.13:7000`.
+- Current worker base URLs on `.13`: OmniVoice `http://192.168.0.13:8766`, SoulX `http://192.168.0.13:7002` (moved from `:7000` on 2026-04-19).
+- Production LLM for Polish podcast generation: `google/gemini-3.1-pro-preview` via OpenRouter (hits 1.5-2.5 min target out-of-the-box, 50% cost of Opus 4.7). Prompt: `defaultHostPersonalitiesPolish` v8 (Rogan-style, MAX 220 zn, 10 wymian, dialekt Śląsk+Góralski, bez wymogu codziennych elementów).
+- SoulX default model: `pro` (since 2026-04-19), override `lite` per job if needed.
 - Historical compatibility mapping must stay:
   - `host_a` -> `obea`
   - `host_b` -> `okarlik2`

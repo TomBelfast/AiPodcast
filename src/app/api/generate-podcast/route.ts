@@ -4,23 +4,6 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
 import { supabase } from "@/lib/supabase";
 
-const podcastSchema = z.object({
-  conversation: z
-    .array(
-      z.object({
-        speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Zofia"]),
-        text: z
-          .string()
-          .describe(
-            "The text spoken by this speaker, including natural speech patterns and nuances like [laughs], [pauses], [excited], etc."
-          ),
-      })
-    )
-    .describe(
-      "A natural podcast conversation between two speakers discussing the content"
-    ),
-});
-
 export async function POST(req: NextRequest) {
   try {
     const {
@@ -32,7 +15,30 @@ export async function POST(req: NextRequest) {
       hostPersonalitiesPromptPolish,
       hostPersonalitiesPromptOther,
       openaiApiKey: userOpenaiApiKey, // Added: Extract key from request
+      ttsEngine,
     } = await req.json();
+
+    const ttsEngineNormalized = String(ttsEngine || 'elevenlabs').toLowerCase();
+    const isTtsOmnivoice = ttsEngineNormalized === 'omnivoice';
+
+    const podcastSchema = z.object({
+      conversation: z
+        .array(
+          z.object({
+            speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Zofia"]),
+            text: z
+              .string()
+              .describe(
+                isTtsOmnivoice
+                  ? "The text spoken by this speaker. Plain speakable sentences only. No bracketed stage directions, no emotional annotations, no em-dash interruptions, no non-verbal cues."
+                  : "The text spoken by this speaker, including natural speech patterns and nuances like [laughs], [pauses], [excited], etc."
+              ),
+          })
+        )
+        .describe(
+          "A natural podcast conversation between two speakers discussing the content"
+        ),
+    });
 
     if (!content) {
       return NextResponse.json(
@@ -215,42 +221,55 @@ SYNTAX AND GRAMMATICAL CORRECTNESS:
 
     const defaultPolishEndingPrompt = ``;
 
-    const defaultHostPersonalitiesPolish = `HOST PERSONALITIES:
-Antoni (Male - Energetic & Naive):
-- MALE speaker with an extremely enthusiastic and optimistic personality
-- CRITICAL: Use MASCULINE grammatical forms in Polish
-  * Polish examples: "byłem", "zrobiłem", "powiedziałem", "widziałem", "myślę" (masculine forms)
-  * Use masculine verb endings and adjectives that agree with the male speaker
-- ADDRESSING ZOFIA: When speaking to Zofia, ALWAYS use FEMININE forms
-  * Examples: "słyszałaś", "widziałaś", "zrobiłabyś", "mogłabyś"
-- DIALECT: Antoni should use SILESIAN dialect (śląski)
-  * Use typical Silesian vocabulary and expressions: "jo", "jakże", "ino", "że", "siekiera", "kaj", "fajnie"
-  * Silesian grammatical features: "idymy" instead of "idziemy", "robimy" stays similar, but with Silesian intonation patterns
-  * Natural Silesian expressions and word order
-- Easily excited by new concepts and ideas
-- Asks lots of questions, sometimes obvious ones
-- Uses exclamation points frequently and energetic language
-- Tends to see the bright side of everything
-- Sometimes misses subtleties or nuances
-- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
+    const defaultHostPersonalitiesPolish = `TOP PRIORITY — STYL ROGANA (JAK W JOE ROGAN PODCAST):
+Dialog MUSI być dynamiczny i szybki jak w najlepszych odcinkach Rogana z ciężkim
+polskim humorem. NIE jest to suchy komentarz newsowy. To pyskówka dwojga
+kolegów w pubie.
 
-Zofia (Female - Pessimistic & Arrogant):
-- FEMALE speaker who is skeptical and cynical about most claims
-- CRITICAL: Use FEMININE grammatical forms in Polish
-  * Polish examples: "byłam", "zrobiłam", "powiedziałam", "widziałam", "myślę" but with feminine agreement when applicable
-  * Use feminine verb endings and adjectives that agree with the female speaker
-- ADDRESSING ANTONI: When speaking to Antoni, ALWAYS use MASCULINE forms
-  * Examples: "słyszałeś", "widziałeś", "zrobiłbyś", "mógłbyś", "zauważyłeś"
-- DIALECT: Zofia should use GORAL (Highland) dialect (góralski)
-  * Use typical Goral vocabulary and expressions: "tyz", "hej", "ino", "jesce", "kiej", "kieby", "bedzie"
-  * Goral grammatical features: "som" instead of "są", "robia" instead of "robią", typical Goral intonation
-  * Natural Goral expressions and word order with characteristic melodic patterns
-- Knows everything (or thinks they do)
-- Often corrects or challenges Antoni
-- Uses condescending language and sighs frequently
-- Points out flaws, problems, and downsides
-- Makes sarcastic comments and eye-rolls
-- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
+TWARDE ZASADY DŁUGOŚCI (cel: podcast 1.5-2.5 minuty):
+- Każda kwestia MAX 2-3 zdania. MAX 220 znaków na kwestię.
+- ŻADNYCH długich tyrad ani pompatycznych wywodów — ale fakt + pointa OK.
+- Dialog dynamiczny, "ping-pong": reakcja, pointa, reakcja, pointa.
+- Total: DOKŁADNIE 10 wymian (5 Antoni + 5 Zofia). Nie mniej.
+- Łącznie cały dialog 1600-2200 znaków (to daje ~1.5-2.5 min w TTS).
+
+PRIORYTET TREŚCI (gdy konkurują, wybieraj tak):
+1) GWARA (min. 2 markery w kwestii)
+2) POINTA (śmiech, absurd, callback, sarkazm)
+3) FAKT TECHNICZNY (tylko jako pretekst do gagu — nie samoistnie)
+
+Antoni (Male - Energetic & Naive):
+- Skrajnie entuzjastyczny, podekscytowany, naiwny do bólu.
+- MASCULINE grammatical forms: "byłem", "zrobiłem", "widziałem", "godom".
+- ADDRESSING ZOFIA: FEMININE formy: "słyszałaś", "widziałaś".
+- DIALEKT ŚLĄSKI — MIN. 2 wyrazy śląskie z listy w KAŻDEJ kwestii:
+  jo, ino, kaj, fajnie, godom, wiym, idymy, bydzie, żeś, gryfny,
+  pierona, rychtyg, siekiera, łokno, cza, żech, czytoł, pieruńsko.
+- Signature: "Jo Ci godom…", "Kaj tam…", "Rychtyg…", "Pierona!".
+- Wyciąga absurdalne konsekwencje hype'u. Pyta naiwne pytania.
+
+Zofia (Female - Sarcastic & Cynical):
+- Sarkastyczna, cyniczna, sucha. Zbija entuzjazm jednym zdaniem.
+- FEMININE grammatical forms: "byłam", "zrobiłam", "widziałam".
+- ADDRESSING ANTONI: MASCULINE formy: "słyszałeś", "mógłbyś".
+- DIALEKT GÓRALSKI — MIN. 2 wyrazy góralskie z listy w KAŻDEJ kwestii:
+  tyż, hej, ino, jesce, kiej, kiebyś, som, robia, pado, jako, bedzie,
+  dyć, ftory, juści, kozdy, wom, mosz, fcora.
+- Signature: "Hej Antoni…", "Tyż mi…", "Dyć…", "Kiebyś pomyślał…".
+- Nie moralizuje — żartuje. Jedna sarkastyczna pointa wystarczy.
+
+PRZYKŁAD WZORCOWEJ WYMIANY ROGAN-STYLE (naśladuj tempo, nie słowa):
+Antoni: "Jo Ci godom, siekiera jak oni ten model wypuścili — cołki internet szaleje!"
+Zofia: "Hej, tyż mi szał — jesce wczoraj obiecywali że stary wszystko ogarnie."
+Antoni: "Pieruńsko, trzy razy lepij obrazki rozumi! Rychtyg czary!"
+Zofia: "Czary, juści. Kiej zmienisz mu jeden przecinek, zapomina co widzioł."
+Antoni: "Ale godom, automatyzuje cołki workflow w chmurze, fajnie nie?"
+Zofia: "Fajnie, dyć kiebyś przeczytoł cennik, to byś se na kawę nie odłożył."
+Antoni: "A ten Mythos sekretny? Pierona, ukrywajom przed nami bombę!"
+Zofia: "Hej, kozdy tak robi — hype najpierw, kod potem, prawda na końcu."
+
+Zauważ: krótko, szybko, każda kwestia = gwara + pointa + reakcja. Rogan
+by przybił piątkę.`;
 
     const defaultHostPersonalitiesOther = `HOST PERSONALITIES:
 Speaker1 (Male - Energetic & Naive):
@@ -296,13 +315,23 @@ Speaker2 (Female - Pessimistic & Arrogant):
     try {
       console.log(`[Generate Podcast] Calling LLM with prompt length: ${300 + hostPersonalitiesSection.length + usedMainPrompt.length}...`);
       
+      const ttsGuard = isTtsOmnivoice
+        ? `CRITICAL TTS RULES (OmniVoice output — overrides ANY conflicting instruction later in this prompt):
+- Do NOT include emotional annotations like [laughs], [chuckles], [sighs], [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed], [eye roll], [pauses], or any bracketed stage directions.
+- Do NOT use em-dashes (—) to show interruptions. Do not truncate sentences with dashes. Every line must be a complete, self-contained sentence.
+- No non-verbal cues, no action descriptions, no parenthetical asides.
+- Output only clean speakable text a neural TTS will read aloud verbatim.
+
+`
+        : '';
+
       result = await streamObject({
         model,
         schema: podcastSchema,
-        prompt: `IMPORTANT: Make this a VERY SHORT, high-energy podcast of about 1.5-2 minutes. Aim for 1200-1800 characters total (ABSOLUTE MAXIMUM — NEVER EXCEED 2200 chars). Use only 7-9 short and dynamic exchanges. Condense only the most vital points.
+        prompt: `${ttsGuard}IMPORTANT: Make this a VERY SHORT, high-energy podcast of about 1.5-2 minutes. Aim for 1200-1800 characters total (ABSOLUTE MAXIMUM — NEVER EXCEED 2200 chars). Use only 7-9 short and dynamic exchanges. Condense only the most vital points.
 
 Create a highly dynamic, natural podcast conversation in ${languageName} between Antoni and Zofia based on the provided content.
-      
+
 Title: ${title || "Article"}
 Content: ${content}
 

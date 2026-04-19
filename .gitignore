@@ -45,3 +45,11 @@ next-env.d.ts
 
 # test files
 test-minio.js
+/test-output-audio
+/test-output-real-job
+
+# admin runtime settings
+.admin_settings.json
+
+# route backup files
+*.bak.*

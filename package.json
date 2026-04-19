@@ -14,15 +14,18 @@
     "@mendable/firecrawl-js": "^4.3.4",
     "@supabase/supabase-js": "^2.97.0",
     "ai": "^5.0.34",
+    "fluent-ffmpeg": "^2.1.3",
     "minio": "^7.1.3",
     "next": "15.5.2",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "undici": "^7.25.0",
     "zod": "^4.1.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
+    "@types/fluent-ffmpeg": "^2.1.28",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

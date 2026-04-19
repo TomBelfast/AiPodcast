@@ -33,7 +33,7 @@ export async function GET(
 
     const name = request.nextUrl.searchParams.get('name') || undefined;
     const isMp4Segment = type === 'segment' && !!name && name.toLowerCase().endsWith('.mp4');
-    const isPublicArtifact = type === 'mp4' || isMp4Segment;
+    const isPublicArtifact = type === 'mp4' || type === 'srt' || isMp4Segment;
     if (!isPublicArtifact && !isPodcastVideoAuthorized(request)) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
