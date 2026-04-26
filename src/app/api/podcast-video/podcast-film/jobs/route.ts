@@ -1172,9 +1172,9 @@ function wrapTitleText(raw: string, maxCharsPerLine: number): string {
 async function generateTitleOverlayPng(titleText: string, outputPng: string): Promise<void> {
   // Use ImageMagick to render each line centered with stroke — ffmpeg drawtext
   // cannot center individual lines of a multiline block in v5.1.
-  const FONT = '/usr/share/fonts/opentype/urw-base35/URWGothic-Demi.otf';
-  const FONT_SIZE = 120;
-  const STROKE_WIDTH = 4;
+  const FONT = '/usr/share/fonts/truetype/open-sans/OpenSans-ExtraBold.ttf';
+  const FONT_SIZE = 110;
+  const STROKE_WIDTH = 6;
   const IMG_W = 1080;
   const IMG_H = 1920;
   const CENTER_Y = 890; // vertical center of the face overlay zone
@@ -1843,7 +1843,7 @@ async function runBackgroundPipeline(
   let titleTextFile: string | null = null;
   if (config.title) {
     titleTextFile = path.join(paths.dir, 'title.txt');
-    await fs.writeFile(titleTextFile, wrapTitleText(config.title.toUpperCase(), 22), 'utf8');
+    await fs.writeFile(titleTextFile, wrapTitleText(config.title.toUpperCase(), 12), 'utf8');
   }
   await compositeOnCover(concatMp4Path, compositeMp4Path, titleTextFile);
   const compositeElapsedMs = Date.now() - compositeStart;
