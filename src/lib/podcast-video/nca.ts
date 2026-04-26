@@ -266,7 +266,7 @@ export async function renderPodcastCaptions(args: {
       word_color: args.settings.word_color,
       outline_color: args.settings.outline_color,
       outline_width: 4,
-      max_words_per_line: 4,
+      max_words_per_line: 1,
       font_size: args.settings.font_size,
       font_family: 'Arial',
       position: 'middle_center',

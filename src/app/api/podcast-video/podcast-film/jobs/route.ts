@@ -4,22 +4,66 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { Agent, fetch as undiciFetch } from 'undici';
-import { isPodcastVideoAuthorized, resolvePublicBaseUrl } from '@/lib/podcast-video/http';
+import { createDialogue } from '@/actions/dialogue';
+import { createGeminiDialogue } from '@/actions/gemini-tts';
+import { getEffectiveAdminSettings } from '@/lib/admin-settings';
+import {
+  normalizeGeminiStyle,
+  normalizeGeminiTempo,
+  normalizeAvatarProvider,
+  normalizeConversationDraft,
+  normalizeReviewMode,
+  normalizeTtsProvider,
+} from '@/lib/podcast/contracts';
+import { generateConversationDraft } from '@/lib/podcast/generate';
+import {
+  isPodcastVideoAuthorized,
+  resolvePublicBaseUrl,
+  resolveRequestBaseUrl,
+} from '@/lib/podcast-video/http';
 import {
   ensurePodcastVideoArchiveDir,
   buildPodcastVideoFileUrl,
   getPodcastVideoJobPaths,
 } from '@/lib/podcast-video/archive';
 import {
+  buildAssHeader,
+  buildClassicAssFromCueGroups,
+  buildClassicCueGroupsFromDisplayTokens,
+  buildClassicCueGroupsFromTimedSegments,
+  buildClassicPseudoCueGroupsFromTimedSegments,
+  buildSegmentCaptionTimings,
+  buildSrtFromCueGroups,
+  escapeAssText,
+  estimateSegmentWordTimings,
+  formatAssTime,
+  hexToAssColor,
+  normalizeComparableToken,
+  normalizeText,
+  toCaptionCase,
+  type CaptionStyle,
+  type DirectClassicAlignmentMode,
+  type DisplayToken,
+} from '@/lib/podcast-video/podcast-film-captions';
+import {
+  ensureRunningJobRecovery,
   initStatus,
   setPhase,
   markDone,
   markFailed,
   readStatus,
 } from '@/lib/podcast-video/job-status';
+import {
+  DEFAULT_ELEVENLABS_VOICES,
+  DEFAULT_GEMINI_VOICES,
+  GEMINI_VOICE_OPTIONS,
+  type VoiceGenderBucket,
+} from '@/lib/voice-catalog';
 
 const OMNIVOICE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const WORKER_PROBE_TIMEOUT_MS = 2500;
+const INTERNAL_GENERATE_PODCAST_TIMEOUT_MS = 8 * 60 * 1000;
+const INTERNAL_GENERATE_PODCAST_ATTEMPT_TIMEOUT_MS = 150 * 1000;
 const OMNIVOICE_JOB_DISPATCHER = new Agent({
   headersTimeout: OMNIVOICE_JOB_TIMEOUT_MS,
   bodyTimeout: OMNIVOICE_JOB_TIMEOUT_MS,
@@ -37,9 +81,10 @@ export const dynamic = 'force-dynamic';
 const OMNIVOICE_BASE_URL =
   process.env.OMNIVOICE_BASE_URL?.trim() || 'http://192.168.0.13:8766';
 const SOULX_BASE_URL =
-  process.env.SOULX_BASE_URL?.trim() || 'http://192.168.0.13:7000';
+  process.env.SOULX_BASE_URL?.trim() || 'http://192.168.0.13:7002';
 
 type Segment = { speaker: string; text: string };
+type TtsEngine = 'omnivoice' | 'gemini' | 'elevenlabs';
 type VoiceEntry = {
   id: string;
   gender: string;
@@ -54,7 +99,15 @@ type PipelineConfig = {
   language: string;
   voice1: string;
   voice2: string;
+  ttsEngine: TtsEngine;
+  geminiApiKey: string | null;
+  geminiStyle: 'plain' | 'expressive-lite';
+  geminiTempo: 'normal' | 'fast';
+  elevenlabsApiKey: string | null;
+  ttsModel: string | null;
   soulxModel: 'pro' | 'lite';
+  avatarProvider: 'soulx';
+  reviewMode: 'off' | 'pause_after_conversation';
   useFaceCrop: boolean;
   imageRotationSeed: number | null;
   pinnedImages: Record<string, string>;
@@ -73,17 +126,65 @@ type PipelineConfig = {
 type PreparedPipelineInput = {
   segments: Segment[];
   voiceRegistry: Map<string, VoiceEntry>;
+  voice1: string;
+  voice2: string;
   maleVoice: string;
   femaleVoice: string;
   voicesSwapped: boolean;
 };
+type GeminiAudioSegment = {
+  segment_id: string;
+  speaker: string;
+  audio_file: string;
+  audio_path: string;
+  audio_content_type: string;
+  duration_seconds: number;
+  start_time_seconds: number;
+  end_time_seconds: number;
+};
+type GeminiSynthesisResult = {
+  segments: GeminiAudioSegment[];
+  elapsed_ms: number;
+  model: string;
+  caption_warning: string;
+};
 type WorkerProbeResult = {
-  service: 'omnivoice' | 'soulx';
+  service: 'omnivoice' | 'omnivoice_assets' | 'soulx';
   ok: boolean;
   url: string;
   detail: string;
   status?: number;
 };
+
+function resolveDirectClassicAlignmentMode(ttsEngine: TtsEngine): DirectClassicAlignmentMode {
+  const raw = String(process.env.PODCAST_FILM_DIRECT_CLASSIC_ALIGNMENT_MODE || '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'segment_cues' || raw === 'classic_pseudo_token') {
+    return raw;
+  }
+  return ttsEngine === 'gemini' ? 'classic_pseudo_token' : 'segment_cues';
+}
+
+function buildClientTtsConfig(args: {
+  provider: TtsEngine;
+  voice1: string;
+  voice2: string;
+  model?: string | null;
+  geminiStyle?: 'plain' | 'expressive-lite';
+  geminiTempo?: 'normal' | 'fast';
+}) {
+  return {
+    provider: args.provider,
+    voice1: args.voice1,
+    voice2: args.voice2,
+    ...(args.model ? { model: args.model } : {}),
+    ...(args.provider === 'gemini' ? {
+      geminiStyle: args.geminiStyle || 'expressive-lite',
+      geminiTempo: args.geminiTempo || 'fast',
+    } : {}),
+  };
+}
 
 class PipelineInputError extends Error {
   status: number;
@@ -96,43 +197,203 @@ class PipelineInputError extends Error {
   }
 }
 
+const GEMINI_VOICE_OPTIONS_BY_ID = new Map(
+  GEMINI_VOICE_OPTIONS.map((voice) => [voice.id.toLowerCase(), voice])
+);
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function getInternalAppBaseUrl(): string {
-  return (
-    process.env.INTERNAL_APP_URL ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    'http://127.0.0.1:3300'
-  )
-    .trim()
-    .replace(/\/+$/, '');
+function normalizeVoiceGender(value: string | undefined): VoiceGenderBucket {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'male' || normalized === 'm') {
+    return 'male';
+  }
+  if (normalized === 'female' || normalized === 'f') {
+    return 'female';
+  }
+  return 'unknown';
+}
+
+function getGeminiVoiceOption(value: string) {
+  return GEMINI_VOICE_OPTIONS_BY_ID.get(String(value || '').trim().toLowerCase());
+}
+
+function inferRequestedVoiceGender(
+  value: string,
+  omnivoiceRegistry: Map<string, VoiceEntry> | null
+): VoiceGenderBucket {
+  const geminiVoice = getGeminiVoiceOption(value);
+  if (geminiVoice) {
+    return geminiVoice.genderBucket;
+  }
+
+  const omnivoiceVoice = omnivoiceRegistry?.get(String(value || '').trim().toLowerCase());
+  if (omnivoiceVoice) {
+    return normalizeVoiceGender(omnivoiceVoice.gender);
+  }
+
+  const normalized = normalizeSpeakerToken(value);
+  if (normalized === 'hosta') {
+    return 'female';
+  }
+  if (normalized === 'hostb') {
+    return 'male';
+  }
+
+  return 'unknown';
+}
+
+function pickFallbackGeminiVoice(
+  requestedGender: VoiceGenderBucket,
+  position: 1 | 2
+): string {
+  if (requestedGender === 'female') {
+    return DEFAULT_GEMINI_VOICES.voice2;
+  }
+  if (requestedGender === 'male') {
+    return DEFAULT_GEMINI_VOICES.voice1;
+  }
+  return position === 1
+    ? DEFAULT_GEMINI_VOICES.voice1
+    : DEFAULT_GEMINI_VOICES.voice2;
+}
+
+function buildGeminiVoiceRegistry(voiceIds: string[]): Map<string, VoiceEntry> {
+  const registry = new Map<string, VoiceEntry>();
+
+  for (const rawVoiceId of voiceIds) {
+    const voiceId = String(rawVoiceId || '').trim();
+    if (!voiceId) {
+      continue;
+    }
+
+    const geminiVoice = getGeminiVoiceOption(voiceId);
+    const gender = geminiVoice?.genderBucket || 'unknown';
+    const entry: VoiceEntry = {
+      id: geminiVoice?.id || voiceId,
+      gender,
+      default_image_folder: gender === 'female' ? 'Woman' : 'Men',
+      aliases: [voiceId],
+    };
+
+    registry.set(entry.id.toLowerCase(), entry);
+    for (const alias of entry.aliases) {
+      registry.set(String(alias).toLowerCase(), entry);
+    }
+  }
+
+  return registry;
+}
+
+function buildDirectAvatarVoiceRegistry(args: {
+  voice1: string;
+  voice2: string;
+  omnivoiceRegistry: Map<string, VoiceEntry> | null;
+}): Map<string, VoiceEntry> {
+  const registry = new Map<string, VoiceEntry>();
+  const entries = [
+    {
+      id: args.voice1,
+      gender:
+        inferRequestedVoiceGender(args.voice1, args.omnivoiceRegistry) === 'female'
+          ? 'female'
+          : 'male',
+      aliases: ['speaker1', 'antoni', 'host_a'],
+    },
+    {
+      id: args.voice2,
+      gender:
+        inferRequestedVoiceGender(args.voice2, args.omnivoiceRegistry) === 'male'
+          ? 'male'
+          : 'female',
+      aliases: ['speaker2', 'zofia', 'host_b'],
+    },
+  ] as const;
+
+  for (const entry of entries) {
+    const voiceId = String(entry.id || '').trim();
+    if (!voiceId) {
+      continue;
+    }
+
+    const voiceEntry: VoiceEntry = {
+      id: voiceId,
+      gender: entry.gender,
+      default_image_folder: entry.gender === 'female' ? 'Woman' : 'Men',
+      aliases: [voiceId, ...entry.aliases],
+    };
+
+    registry.set(voiceEntry.id.toLowerCase(), voiceEntry);
+    for (const alias of voiceEntry.aliases) {
+      registry.set(String(alias).toLowerCase(), voiceEntry);
+    }
+  }
+
+  return registry;
+}
+
+function resolveGeminiVoiceSelection(
+  rawVoice1: string,
+  rawVoice2: string,
+  omnivoiceRegistry: Map<string, VoiceEntry> | null
+): {
+  voice1: string;
+  voice2: string;
+  voiceRegistry: Map<string, VoiceEntry>;
+  maleVoice: string;
+  femaleVoice: string;
+  voicesSwapped: boolean;
+} {
+  const explicitVoice1 = getGeminiVoiceOption(rawVoice1);
+  const explicitVoice2 = getGeminiVoiceOption(rawVoice2);
+
+  const inferredGender1 = inferRequestedVoiceGender(rawVoice1, omnivoiceRegistry);
+  const inferredGender2 = inferRequestedVoiceGender(rawVoice2, omnivoiceRegistry);
+
+  const voice1 = explicitVoice1?.id || pickFallbackGeminiVoice(inferredGender1, 1);
+  const voice2 = explicitVoice2?.id || pickFallbackGeminiVoice(inferredGender2, 2);
+
+  const voiceRegistry = buildGeminiVoiceRegistry([voice1, voice2]);
+  const {
+    maleVoice,
+    femaleVoice,
+    swapped: voicesSwapped,
+  } = resolveGenderedVoicePair(voice1, voice2, voiceRegistry);
+
+  return {
+    voice1,
+    voice2,
+    voiceRegistry,
+    maleVoice,
+    femaleVoice,
+    voicesSwapped,
+  };
+}
+
+function resolvePodcastFilmGeminiApiKey(explicitKey?: string | null): string | null {
+  const normalizedExplicit = String(explicitKey || '').trim();
+  if (normalizedExplicit) {
+    return normalizedExplicit;
+  }
+
+  const adminSettings = getEffectiveAdminSettings();
+  return String(adminSettings.gemini_api_key || '').trim() || null;
+}
+
+function resolvePodcastFilmElevenLabsApiKey(explicitKey?: string | null): string | null {
+  const normalizedExplicit = String(explicitKey || '').trim();
+  if (normalizedExplicit) {
+    return normalizedExplicit;
+  }
+
+  const adminSettings = getEffectiveAdminSettings();
+  return String(adminSettings.elevenlabs_api_key || '').trim() || null;
 }
 
 function normalizeConversationItems(conversation: unknown): ConversationItem[] {
-  if (!Array.isArray(conversation) || conversation.length === 0) {
-    return [];
-  }
-
-  return conversation
-    .map((item) => {
-      if (!isPlainObject(item)) {
-        return null;
-      }
-
-      const speaker = String(item.speaker ?? item.role ?? item.name ?? '').trim();
-      const text = String(item.text ?? item.content ?? '').replace(/\s+/g, ' ').trim();
-      if (!text) {
-        return null;
-      }
-
-      return {
-        speaker: speaker || 'Speaker1',
-        text,
-      };
-    })
-    .filter((item): item is ConversationItem => Boolean(item));
+  return normalizeConversationDraft(conversation);
 }
 
 function normalizeSpeakerToken(value: string): string {
@@ -165,98 +426,37 @@ function resolveVoiceForSpeaker(rawSpeaker: string, voice1: string, voice2: stri
   return voice1;
 }
 
-async function parseConversationStream(response: Response): Promise<ConversationItem[]> {
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new Error('Generator conversation stream is unavailable.');
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let finalConversation: ConversationItem[] = [];
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-
-      const parsed = JSON.parse(trimmed) as {
-        type?: string;
-        error?: string;
-        data?: { conversation?: unknown };
-      };
-
-      if (parsed.type === 'error') {
-        throw new Error(parsed.error || 'Conversation generation failed.');
-      }
-
-      if (parsed.type === 'complete') {
-        finalConversation = normalizeConversationItems(parsed.data?.conversation);
-      }
-    }
-  }
-
-  if (buffer.trim()) {
-    const parsed = JSON.parse(buffer.trim()) as {
-      type?: string;
-      error?: string;
-      data?: { conversation?: unknown };
-    };
-
-    if (parsed.type === 'error') {
-      throw new Error(parsed.error || 'Conversation generation failed.');
-    }
-
-    if (parsed.type === 'complete') {
-      finalConversation = normalizeConversationItems(parsed.data?.conversation);
-    }
-  }
-
-  return finalConversation;
-}
-
 async function generateSegmentsFromRawText(
   transcript: string,
   title: string,
   language: string,
   maleVoice: string,
-  femaleVoice: string
+  femaleVoice: string,
+  ttsEngine: TtsEngine,
+  geminiStyle: 'plain' | 'expressive-lite',
+  geminiTempo: 'normal' | 'fast',
+  internalAppBaseUrl: string
 ): Promise<Segment[]> {
-  const response = await fetch(`${getInternalAppBaseUrl()}/api/generate-podcast`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      content: transcript,
-      title,
-      language,
-      ttsEngine: 'omnivoice',
-    }),
-    signal: AbortSignal.timeout(5 * 60 * 1000),
+  const conversation = await generateConversationDraft({
+    rawText: transcript,
+    title,
+    language,
+    ttsProvider: ttsEngine === 'omnivoice' ? 'omnivoice' : ttsEngine,
+    geminiStyle,
+    geminiTempo,
+    internalAppBaseUrl,
+    timeoutMs: INTERNAL_GENERATE_PODCAST_TIMEOUT_MS,
+    llmAttemptTimeoutMs: INTERNAL_GENERATE_PODCAST_ATTEMPT_TIMEOUT_MS,
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Conversation generation failed: ${errorText.slice(0, 500)}`);
-  }
-
-  const conversation = await parseConversationStream(response);
   return conversation.map((item) => ({
     speaker: resolveVoiceForSpeaker(item.speaker, maleVoice, femaleVoice),
     text: item.text,
   }));
+}
+
+function dataUrlToBuffer(dataUrl: string): Buffer {
+  const payload = dataUrl.includes(',') ? dataUrl.split(',', 2)[1] : dataUrl;
+  return Buffer.from(payload, 'base64');
 }
 
 function describeError(error: unknown): string {
@@ -376,6 +576,50 @@ async function probeOmniVoiceReadiness(): Promise<WorkerProbeResult> {
   }
 }
 
+async function probeOmniVoiceAssetReadiness(): Promise<WorkerProbeResult> {
+  const folders = ['Woman', 'Men'];
+  for (const folder of folders) {
+    const url = `${OMNIVOICE_BASE_URL}/images?folder=${encodeURIComponent(folder)}`;
+    try {
+      const res = await fetchJsonWithProbe(url);
+      if (!res.ok) {
+        return {
+          service: 'omnivoice_assets',
+          ok: false,
+          url,
+          status: res.status,
+          detail: `images(${folder}) returned HTTP ${res.status}`,
+        };
+      }
+      const files =
+        isPlainObject(res.data) && Array.isArray(res.data.files) ? res.data.files : null;
+      if (!files || files.length === 0) {
+        return {
+          service: 'omnivoice_assets',
+          ok: false,
+          url,
+          status: res.status,
+          detail: `images(${folder}) responded, but returned no files`,
+        };
+      }
+    } catch (error) {
+      return {
+        service: 'omnivoice_assets',
+        ok: false,
+        url,
+        detail: `images(${folder}) request failed: ${describeError(error)}`,
+      };
+    }
+  }
+
+  return {
+    service: 'omnivoice_assets',
+    ok: true,
+    url: `${OMNIVOICE_BASE_URL}/images`,
+    detail: 'ready (Woman and Men image folders visible)',
+  };
+}
+
 async function probeSoulXReadiness(): Promise<WorkerProbeResult> {
   const candidates = [
     `${SOULX_BASE_URL}/health`,
@@ -412,12 +656,8 @@ async function probeSoulXReadiness(): Promise<WorkerProbeResult> {
         detail: `probe returned HTTP ${res.status}`,
       };
     } catch (error) {
-      return {
-        service: 'soulx',
-        ok: false,
-        url,
-        detail: `probe failed: ${describeError(error)}`,
-      };
+      details.push(`${new URL(url).pathname || '/'} -> ${describeError(error)}`);
+      continue;
     }
   }
 
@@ -429,7 +669,10 @@ async function probeSoulXReadiness(): Promise<WorkerProbeResult> {
   };
 }
 
-async function runWorkerPreflightChecks(): Promise<WorkerProbeResult[]> {
+async function runWorkerPreflightChecks(ttsEngine: TtsEngine): Promise<WorkerProbeResult[]> {
+  if (ttsEngine === 'gemini' || ttsEngine === 'elevenlabs') {
+    return Promise.all([probeOmniVoiceAssetReadiness(), probeSoulXReadiness()]);
+  }
   return Promise.all([probeOmniVoiceReadiness(), probeSoulXReadiness()]);
 }
 
@@ -509,6 +752,28 @@ async function fetchVoiceRegistry(): Promise<Map<string, VoiceEntry>> {
   return map;
 }
 
+async function fetchVoiceRegistryOptional(timeoutMs = 2500): Promise<Map<string, VoiceEntry> | null> {
+  try {
+    const res = await fetch(`${OMNIVOICE_BASE_URL}/voices`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const data = (await res.json()) as { voices?: VoiceEntry[] };
+    const map = new Map<string, VoiceEntry>();
+    for (const v of data.voices || []) {
+      map.set(v.id.toLowerCase(), v);
+      for (const a of v.aliases || []) {
+        map.set(String(a).toLowerCase(), v);
+      }
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchImageList(folder: string): Promise<string[]> {
   const res = await fetch(
     `${OMNIVOICE_BASE_URL}/images?folder=${encodeURIComponent(folder)}`
@@ -578,44 +843,7 @@ async function runFfmpeg(args: string[]): Promise<{ stdout: string; stderr: stri
   });
 }
 
-function formatSrtTimestamp(seconds: number): string {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const ms = Math.round((total - Math.floor(total)) * 1000);
-  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
-  return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
-}
-
-function formatAssTime(seconds: number): string {
-  const total = Math.max(0, seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = Math.floor(total % 60);
-  const cs = Math.round((total - Math.floor(total)) * 100);
-  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
-  return `${h}:${pad(m)}:${pad(s)}.${pad(cs, 2)}`;
-}
-
-// Port of Pipeline A reconciliation. Strip edge punctuation, lowercase for
-// comparison; display text keeps original spelling (dialect preserved).
-const EDGE_PUNCTUATION_PATTERN = /^[.,!?;:()[\]{}"„"'«»…–—-]+|[.,!?;:()[\]{}"„"'«»…–—-]+$/g;
-function normalizeText(value: string): string {
-  return value.replace(/\s+/g, ' ').trim();
-}
-function normalizeComparableToken(value: string): string {
-  return normalizeText(value).replace(EDGE_PUNCTUATION_PATTERN, '').toLocaleLowerCase('pl-PL');
-}
-
 type WhisperWord = { text: string; start: number; end: number };
-type DisplayToken = {
-  id: number;
-  segmentIndex: number;
-  text: string;
-  startTime: number;
-  endTime: number;
-};
 
 // Given a script (original spelling) and Whisper-transcribed words (possibly
 // wrong text on dialects), return tokens that keep script spelling but use
@@ -707,6 +935,156 @@ function matchScriptToWhisperWords(
   return { tokens, matched, unmatched: tokens.length - matched };
 }
 
+async function synthesizeSegmentsWithGemini(
+  jobId: string,
+  jobDir: string,
+  segments: Segment[],
+  apiKey: string,
+  geminiStyle: 'plain' | 'expressive-lite',
+  geminiTempo: 'normal' | 'fast'
+): Promise<GeminiSynthesisResult> {
+  const audioDir = path.join(jobDir, 'gemini-audio');
+  await fs.mkdir(audioDir, { recursive: true });
+
+  const startedAt = Date.now();
+  let cumulativeOffset = 0;
+  let lastModel = 'gemini-3.1-flash-tts-preview';
+  const synthesizedSegments: GeminiAudioSegment[] = [];
+
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    const result = await createGeminiDialogue({
+      inputs: [
+        {
+          text: segment.text,
+          voiceId: segment.speaker,
+        },
+      ],
+      apiKey,
+      geminiStyle,
+      geminiTempo,
+    });
+
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
+
+    if (!result.value.audioBase64) {
+      throw new Error('Gemini TTS returned no audio payload.');
+    }
+
+    lastModel = result.value.model || lastModel;
+    const audioBuffer = dataUrlToBuffer(result.value.audioBase64);
+    const extension = result.value.mimeType === 'audio/wav' ? 'wav' : 'bin';
+    const audioFile = `segment_${String(i + 1).padStart(4, '0')}.${extension}`;
+    const audioPath = path.join(audioDir, audioFile);
+    await fs.writeFile(audioPath, audioBuffer);
+
+    const durationSeconds = await probeDurationSeconds(audioPath);
+    synthesizedSegments.push({
+      segment_id: `segment_${String(i + 1).padStart(4, '0')}`,
+      speaker: segment.speaker,
+      audio_file: audioFile,
+      audio_path: audioPath,
+      audio_content_type: result.value.mimeType,
+      duration_seconds: durationSeconds,
+      start_time_seconds: cumulativeOffset,
+      end_time_seconds: cumulativeOffset + durationSeconds,
+    });
+    cumulativeOffset += durationSeconds;
+
+    await setPhase(
+      jobId,
+      'omnivoice_tts',
+      `Synthesizing Gemini audio ${i + 1}/${segments.length}…`,
+      {
+        current: i + 1,
+        total: segments.length,
+      }
+    );
+  }
+
+  return {
+    segments: synthesizedSegments,
+    elapsed_ms: Date.now() - startedAt,
+    model: lastModel,
+    caption_warning:
+      'Gemini captions use estimated word timing derived from segment duration (no Whisper alignment).',
+  };
+}
+
+async function synthesizeSegmentsWithElevenLabs(
+  jobId: string,
+  jobDir: string,
+  segments: Segment[],
+  apiKey: string,
+  modelId?: string | null
+): Promise<GeminiSynthesisResult> {
+  const audioDir = path.join(jobDir, 'elevenlabs-audio');
+  await fs.mkdir(audioDir, { recursive: true });
+
+  const startedAt = Date.now();
+  let cumulativeOffset = 0;
+  let lastModel = modelId || 'eleven_v3';
+  const synthesizedSegments: GeminiAudioSegment[] = [];
+
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    const result = await createDialogue({
+      inputs: [
+        {
+          text: segment.text,
+          voiceId: segment.speaker,
+        },
+      ],
+      apiKey,
+      modelId: modelId || undefined,
+      includeTimestamps: false,
+    });
+
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
+
+    lastModel = modelId || lastModel;
+    const audioBuffer = dataUrlToBuffer(result.value.audioBase64);
+    const audioFile = `segment_${String(i + 1).padStart(4, '0')}.mp3`;
+    const audioPath = path.join(audioDir, audioFile);
+    await fs.writeFile(audioPath, audioBuffer);
+
+    const durationSeconds = await probeDurationSeconds(audioPath);
+    synthesizedSegments.push({
+      segment_id: `segment_${String(i + 1).padStart(4, '0')}`,
+      speaker: segment.speaker,
+      audio_file: audioFile,
+      audio_path: audioPath,
+      audio_content_type: 'audio/mpeg',
+      duration_seconds: durationSeconds,
+      start_time_seconds: cumulativeOffset,
+      end_time_seconds: cumulativeOffset + durationSeconds,
+    });
+    cumulativeOffset += durationSeconds;
+
+    await setPhase(
+      jobId,
+      'omnivoice_tts',
+      `Synthesizing ElevenLabs audio ${i + 1}/${segments.length}…`,
+      {
+        current: i + 1,
+        total: segments.length,
+      }
+    );
+  }
+
+  return {
+    segments: synthesizedSegments,
+    elapsed_ms: Date.now() - startedAt,
+    model: lastModel,
+    caption_warning:
+      'ElevenLabs direct captions use estimated word timing derived from segment duration (no Whisper alignment in pipeline B).',
+  };
+}
+
 async function transcribeSegmentWords(
   omnivoiceJobId: string,
   segmentFilename: string,
@@ -725,83 +1103,9 @@ async function transcribeSegmentWords(
   return Array.isArray(data.words) ? data.words : [];
 }
 
-type CaptionStyle = {
-  fontSize: number;
-  lineColor: string;
-  wordColor: string;
-  outlineColor: string;
-  marginV: number;
-  marginX: number;
-  playResX: number;
-  playResY: number;
-  fontName: string;
-  visibleWords: number;
-};
-
-function hexToAssColor(hex: string): string {
-  const cleaned = hex.replace('#', '').padStart(6, '0');
-  const rr = cleaned.slice(0, 2);
-  const gg = cleaned.slice(2, 4);
-  const bb = cleaned.slice(4, 6);
-  return `&H00${bb}${gg}${rr}&`;
-}
-function escapeAssText(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/\n/g, '\\N').replace(/\{/g, '(').replace(/\}/g, ')');
-}
-
-function buildLineLimits(fontSize: number) {
-  if (fontSize >= 88) return { maxWordsPerLine: 4, maxCharsPerLine: 24 };
-  if (fontSize >= 72) return { maxWordsPerLine: 5, maxCharsPerLine: 30 };
-  if (fontSize >= 48) return { maxWordsPerLine: 6, maxCharsPerLine: 36 };
-  return { maxWordsPerLine: 6, maxCharsPerLine: 32 };
-}
-
-function splitTokensIntoLines(tokens: DisplayToken[], fontSize: number): DisplayToken[][] {
-  const { maxWordsPerLine, maxCharsPerLine } = buildLineLimits(fontSize);
-  const lines: DisplayToken[][] = [];
-  let cur: DisplayToken[] = [];
-  let curLen = 0;
-  for (const t of tokens) {
-    const nextLen = curLen + t.text.length + (cur.length ? 1 : 0);
-    const tooWords = cur.length >= maxWordsPerLine;
-    const tooChars = cur.length > 0 && nextLen > maxCharsPerLine;
-    if (cur.length > 0 && (tooWords || tooChars)) {
-      lines.push(cur);
-      cur = [];
-      curLen = 0;
-    }
-    cur.push(t);
-    curLen += t.text.length + (cur.length > 1 ? 1 : 0);
-  }
-  if (cur.length) lines.push(cur);
-  return lines.length ? lines : [[]];
-}
-
-function buildAssHeader(style: CaptionStyle): string {
-  const primaryColor = hexToAssColor(style.lineColor);
-  const outlineColor = hexToAssColor(style.outlineColor);
-  return [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    `PlayResX: ${style.playResX}`,
-    `PlayResY: ${style.playResY}`,
-    'ScaledBorderAndShadow: yes',
-    'WrapStyle: 2',
-    'Collisions: Normal',
-    '',
-    '[V4+ Styles]',
-    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,${style.fontName},${style.fontSize},${primaryColor},${primaryColor},${outlineColor},&H00000000&,1,0,0,0,100,100,0,0,1,2,0,8,${style.marginX},${style.marginX},${style.marginV},1`,
-    '',
-    '[Events]',
-    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-  ].join('\n');
-}
-
-const toCaptionCase = (s: string) => s.toLocaleUpperCase('pl-PL');
-
 // Highlight: at each active word, show up to `visibleWords` recent words;
-// paint the current word in wordColor, others in lineColor.
+// paint the current word in wordColor, others in lineColor. Each visible
+// word is rendered on its own ASS row so long words do not crowd one line.
 function buildHighlightAss(tokens: DisplayToken[], style: CaptionStyle): string {
   const lines: string[] = [buildAssHeader(style)];
   if (tokens.length === 0) return lines.join('\n') + '\n';
@@ -810,28 +1114,16 @@ function buildHighlightAss(tokens: DisplayToken[], style: CaptionStyle): string 
   const inactiveHex = hexToAssColor(style.lineColor);
   const visible = Math.max(1, style.visibleWords);
 
-  const allLines = splitTokensIntoLines(tokens, style.fontSize);
-
   for (let i = 0; i < tokens.length; i++) {
     const active = tokens[i];
     const startIdx = Math.max(0, i - (visible - 1));
-    const visibleIds = new Set<number>();
-    for (let k = startIdx; k <= i; k++) visibleIds.add(tokens[k].id);
-
-    const renderedLines: string[] = [];
-    for (const line of allLines) {
-      const pieces: string[] = [];
-      for (const tok of line) {
-        if (!visibleIds.has(tok.id)) continue;
-        const display = escapeAssText(toCaptionCase(tok.text));
-        if (tok.id === active.id) {
-          pieces.push(`{\\c${activeHex}}${display}{\\c${inactiveHex}}`);
-        } else {
-          pieces.push(display);
-        }
+    const renderedLines = tokens.slice(startIdx, i + 1).map((tok) => {
+      const display = escapeAssText(toCaptionCase(tok.text));
+      if (tok.id === active.id) {
+        return `{\\c${activeHex}}${display}{\\c${inactiveHex}}`;
       }
-      if (pieces.length) renderedLines.push(pieces.join(' '));
-    }
+      return display;
+    });
     const text = renderedLines.join('\\N');
     if (!text) continue;
 
@@ -844,39 +1136,6 @@ function buildHighlightAss(tokens: DisplayToken[], style: CaptionStyle): string 
 
   return lines.join('\n') + '\n';
 }
-
-function buildClassicAss(tokens: DisplayToken[], style: CaptionStyle): string {
-  const lines: string[] = [buildAssHeader(style)];
-  if (tokens.length === 0) return lines.join('\n') + '\n';
-
-  // Group by segmentIndex, then split into cues ~2 lines each.
-  const bySegment = new Map<number, DisplayToken[]>();
-  for (const t of tokens) {
-    const list = bySegment.get(t.segmentIndex) || [];
-    list.push(t);
-    bySegment.set(t.segmentIndex, list);
-  }
-
-  for (const segTokens of bySegment.values()) {
-    const segLines = splitTokensIntoLines(segTokens, style.fontSize);
-    for (let i = 0; i < segLines.length; i += 2) {
-      const cueLines = segLines.slice(i, i + 2);
-      const flat = cueLines.flat();
-      if (!flat.length) continue;
-      const cueStart = flat[0].startTime;
-      const cueEnd = flat[flat.length - 1].endTime;
-      const text = cueLines
-        .map((line) => line.map((t) => escapeAssText(toCaptionCase(t.text))).join(' '))
-        .join('\\N');
-      lines.push(
-        `Dialogue: 0,${formatAssTime(cueStart)},${formatAssTime(cueEnd)},Default,,0,0,${style.marginV},,${text}`
-      );
-    }
-  }
-
-  return lines.join('\n') + '\n';
-}
-
 const COVER_TEMPLATE_PATH = '/root/AiPodcast/podcast_cover.png';
 const COVER_OVERLAY_Y = 420;
 const COVER_OVERLAY_W = 1080;
@@ -910,33 +1169,73 @@ function wrapTitleText(raw: string, maxCharsPerLine: number): string {
   return outLines.join('\n');
 }
 
+async function generateTitleOverlayPng(titleText: string, outputPng: string): Promise<void> {
+  // Use ImageMagick to render each line centered with stroke — ffmpeg drawtext
+  // cannot center individual lines of a multiline block in v5.1.
+  const FONT = '/usr/share/fonts/opentype/urw-base35/URWGothic-Demi.otf';
+  const FONT_SIZE = 120;
+  const STROKE_WIDTH = 4;
+  const IMG_W = 1080;
+  const IMG_H = 1920;
+  const CENTER_Y = 890; // vertical center of the face overlay zone
+  const offset = CENTER_Y - IMG_H / 2; // relative to ImageMagick gravity Center
+
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn('convert', [
+      '-size', `${IMG_W}x${IMG_H}`,
+      'xc:none',
+      '-font', FONT,
+      '-pointsize', String(FONT_SIZE),
+      '-fill', '#00FF04',
+      '-stroke', 'black',
+      '-strokewidth', String(STROKE_WIDTH),
+      '-gravity', 'Center',
+      '-annotate', `+0+${offset}`,
+      titleText,
+      outputPng,
+    ]);
+    let stderr = '';
+    proc.stderr.on('data', (c) => (stderr += c.toString()));
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ImageMagick title overlay exit ${code}: ${stderr.slice(-400)}`));
+    });
+  });
+}
+
 async function compositeOnCover(
   concatMp4: string,
   outputMp4: string,
   titleTextFile: string | null
 ): Promise<{ elapsed_ms: number }> {
   const start = Date.now();
-  const baseFilter = `[0:v]scale=${COVER_OVERLAY_W}:${COVER_OVERLAY_W}:flags=lanczos,crop=${COVER_OVERLAY_W}:${COVER_OVERLAY_H}:0:${(COVER_OVERLAY_W - COVER_OVERLAY_H) / 2}[fg];[1:v][fg]overlay=0:${COVER_OVERLAY_Y}`;
-  const titleFilter = titleTextFile
-    ? `,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:textfile='${titleTextFile}':fontcolor=0x00FF04:fontsize=64:x=(w-text_w)/2:y=1512-text_h/2:line_spacing=10:box=0:enable='between(t,0,${CAPTION_START_DELAY_SECONDS})'`
-    : '';
-  const filterComplex = baseFilter + titleFilter;
+
+  // Generate title overlay PNG via ImageMagick for proper per-line centering
+  let titleOverlayPng: string | null = null;
+  if (titleTextFile) {
+    const rawTitle = await fs.readFile(titleTextFile, 'utf8');
+    titleOverlayPng = titleTextFile.replace('.txt', '_overlay.png');
+    await generateTitleOverlayPng(rawTitle, titleOverlayPng);
+  }
+
+  const baseFilter = `[0:v]scale=${COVER_OVERLAY_W}:${COVER_OVERLAY_W}:flags=lanczos,crop=${COVER_OVERLAY_W}:${COVER_OVERLAY_H}:0:${(COVER_OVERLAY_W - COVER_OVERLAY_H) / 2}[fg];[1:v][fg]overlay=0:${COVER_OVERLAY_Y}[bg]`;
+  const filterComplex = titleOverlayPng
+    ? `${baseFilter};[bg][2:v]overlay=0:0:enable='between(t,0,${CAPTION_START_DELAY_SECONDS})'`
+    : `${baseFilter.replace('[bg]', '')}`;
+
+  const ffmpegArgs = titleOverlayPng
+    ? ['-y', '-i', concatMp4, '-i', COVER_TEMPLATE_PATH, '-i', titleOverlayPng,
+        '-filter_complex', filterComplex,
+        '-map', '0:a?', '-c:a', 'copy', '-c:v', 'libx264', '-preset', 'medium',
+        '-crf', '18', '-pix_fmt', 'yuv420p', '-shortest', outputMp4]
+    : ['-y', '-i', concatMp4, '-i', COVER_TEMPLATE_PATH,
+        '-filter_complex', filterComplex,
+        '-map', '0:a?', '-c:a', 'copy', '-c:v', 'libx264', '-preset', 'medium',
+        '-crf', '18', '-pix_fmt', 'yuv420p', '-shortest', outputMp4];
+
   await new Promise<void>((resolve, reject) => {
-    const proc = spawn('ffmpeg', [
-      '-y',
-      '-i', concatMp4,
-      '-i', COVER_TEMPLATE_PATH,
-      '-filter_complex',
-      filterComplex,
-      '-map', '0:a?',
-      '-c:a', 'copy',
-      '-c:v', 'libx264',
-      '-preset', 'medium',
-      '-crf', '18',
-      '-pix_fmt', 'yuv420p',
-      '-shortest',
-      outputMp4,
-    ]);
+    const proc = spawn('ffmpeg', ffmpegArgs);
     let stderr = '';
     proc.stderr.on('data', (c) => (stderr += c.toString()));
     proc.on('error', reject);
@@ -945,6 +1244,8 @@ async function compositeOnCover(
       else reject(new Error(`ffmpeg composite exit ${code}: ${stderr.slice(-600)}`));
     });
   });
+
+  if (titleOverlayPng) await fs.unlink(titleOverlayPng).catch(() => {});
   return { elapsed_ms: Date.now() - start };
 }
 
@@ -979,83 +1280,6 @@ async function burnAssOntoMp4(
       else reject(new Error(`ffmpeg ass burn exit ${code}: ${stderr.slice(-600)}`));
     });
   });
-}
-
-// Port of Pipeline A's splitTokensIntoLines + groupLinesIntoCues: break long
-// segment text into cues of ~2 lines × 6 words each, distribute segment
-// duration proportionally by cue count.
-function splitSegmentIntoCues(
-  text: string,
-  startTime: number,
-  endTime: number,
-  maxWordsPerLine = 6,
-  maxCharsPerLine = 32,
-  linesPerCue = 2
-): Array<{ start: number; end: number; text: string }> {
-  const tokens = text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-  if (tokens.length === 0) return [];
-
-  const lines: string[][] = [];
-  let cur: string[] = [];
-  let curLen = 0;
-  for (const t of tokens) {
-    const nextLen = curLen + t.length + (cur.length ? 1 : 0);
-    const tooManyWords = cur.length >= maxWordsPerLine;
-    const tooManyChars = cur.length > 0 && nextLen > maxCharsPerLine;
-    if (cur.length > 0 && (tooManyWords || tooManyChars)) {
-      lines.push(cur);
-      cur = [];
-      curLen = 0;
-    }
-    cur.push(t);
-    curLen += t.length + (cur.length > 1 ? 1 : 0);
-  }
-  if (cur.length) lines.push(cur);
-
-  const totalCues = Math.max(1, Math.ceil(lines.length / linesPerCue));
-  const duration = Math.max(0.12, endTime - startTime);
-  const perCue = duration / totalCues;
-
-  const cues: Array<{ start: number; end: number; text: string }> = [];
-  for (let i = 0; i < lines.length; i += linesPerCue) {
-    const cueIndex = i / linesPerCue;
-    const cueLines = lines.slice(i, i + linesPerCue);
-    const cueStart = startTime + perCue * cueIndex;
-    const cueEnd =
-      cueIndex === totalCues - 1 ? endTime : startTime + perCue * (cueIndex + 1);
-    cues.push({
-      start: cueStart,
-      end: cueEnd,
-      text: toCaptionCase(cueLines.map((line) => line.join(' ')).join('\n')),
-    });
-  }
-  return cues;
-}
-
-function buildSrtFromSegments(
-  segs: Array<{ text: string; duration_seconds: number }>,
-  startOffsetSeconds = 0
-): string {
-  const lines: string[] = [];
-  let cursor = startOffsetSeconds;
-  let idx = 1;
-  for (const seg of segs) {
-    const cues = splitSegmentIntoCues(
-      seg.text,
-      cursor,
-      cursor + seg.duration_seconds
-    );
-    for (const cue of cues) {
-      lines.push(
-        String(idx++),
-        `${formatSrtTimestamp(cue.start)} --> ${formatSrtTimestamp(cue.end)}`,
-        cue.text,
-        ''
-      );
-    }
-    cursor += seg.duration_seconds;
-  }
-  return lines.join('\n');
 }
 
 async function probeDurationSeconds(filePath: string): Promise<number> {
@@ -1239,42 +1463,88 @@ async function renderSegmentViaSoulX(args: {
 
 async function preparePipelineInput(config: Pick<
   PipelineConfig,
-  'conversation' | 'transcript' | 'title' | 'language' | 'voice1' | 'voice2'
->): Promise<PreparedPipelineInput> {
+  'conversation' | 'transcript' | 'title' | 'language' | 'voice1' | 'voice2' | 'ttsEngine' | 'geminiStyle' | 'geminiTempo'
+>,
+  internalAppBaseUrl: string,
+  onProgress?: (message: string, current: number, total: number) => Promise<void> | void
+): Promise<PreparedPipelineInput> {
+  const reportProgress = async (message: string, current: number, total: number) => {
+    await onProgress?.(message, current, total);
+  };
+
   let voiceRegistry: Map<string, VoiceEntry>;
-  try {
-    voiceRegistry = await fetchVoiceRegistry();
-  } catch (error) {
-    throw new PipelineInputError(502, {
-      error: 'Failed to fetch OmniVoice voice registry.',
-      detail: describeError(error),
+  let voice1 = config.voice1;
+  let voice2 = config.voice2;
+  let maleVoice = config.voice1;
+  let femaleVoice = config.voice2;
+  let voicesSwapped = false;
+  const progressTotal = 4;
+
+  await reportProgress('Resolving voice registry…', 1, progressTotal);
+
+  if (config.ttsEngine === 'gemini') {
+    const omnivoiceRegistry = await fetchVoiceRegistryOptional();
+    const resolvedGeminiVoices = resolveGeminiVoiceSelection(
+      config.voice1,
+      config.voice2,
+      omnivoiceRegistry
+    );
+    voiceRegistry = resolvedGeminiVoices.voiceRegistry;
+    voice1 = resolvedGeminiVoices.voice1;
+    voice2 = resolvedGeminiVoices.voice2;
+    maleVoice = resolvedGeminiVoices.maleVoice;
+    femaleVoice = resolvedGeminiVoices.femaleVoice;
+    voicesSwapped = resolvedGeminiVoices.voicesSwapped;
+  } else if (config.ttsEngine === 'elevenlabs') {
+    const omnivoiceRegistry = await fetchVoiceRegistryOptional();
+    voiceRegistry = buildDirectAvatarVoiceRegistry({
+      voice1: config.voice1,
+      voice2: config.voice2,
+      omnivoiceRegistry,
     });
+    maleVoice = config.voice1;
+    femaleVoice = config.voice2;
+  } else {
+    try {
+      voiceRegistry = await fetchVoiceRegistry();
+    } catch (error) {
+      throw new PipelineInputError(502, {
+        error: 'Failed to fetch OmniVoice voice registry.',
+        detail: describeError(error),
+      });
+    }
+
+    const genderedPair = resolveGenderedVoicePair(config.voice1, config.voice2, voiceRegistry);
+    maleVoice = genderedPair.maleVoice;
+    femaleVoice = genderedPair.femaleVoice;
+    voicesSwapped = genderedPair.swapped;
   }
 
-  const {
-    maleVoice,
-    femaleVoice,
-    swapped: voicesSwapped,
-  } = resolveGenderedVoicePair(config.voice1, config.voice2, voiceRegistry);
+  await reportProgress('Preparing dialogue segments…', 2, progressTotal);
 
   let segments: Segment[] | null = segmentsFromConversation(
     config.conversation,
-    maleVoice,
-    femaleVoice
+    voice1,
+    voice2
   );
 
   if (!segments && config.transcript) {
-    segments = parseTranscriptToSegments(config.transcript, config.voice1, config.voice2);
+    segments = parseTranscriptToSegments(config.transcript, voice1, voice2);
   }
 
   if ((!segments || segments.length === 0) && config.transcript) {
+    await reportProgress('Generating conversation draft…', 3, progressTotal);
     try {
       segments = await generateSegmentsFromRawText(
         config.transcript,
         config.title || 'Podcast Video',
         config.language,
         maleVoice,
-        femaleVoice
+        femaleVoice,
+        config.ttsEngine,
+        config.geminiStyle,
+        config.geminiTempo,
+        internalAppBaseUrl
       );
     } catch (error) {
       throw new PipelineInputError(502, {
@@ -1283,6 +1553,8 @@ async function preparePipelineInput(config: Pick<
       });
     }
   }
+
+  await reportProgress('Finalizing dialogue segments…', 4, progressTotal);
 
   if (!segments || segments.length === 0) {
     throw new PipelineInputError(400, {
@@ -1304,6 +1576,8 @@ async function preparePipelineInput(config: Pick<
   return {
     segments,
     voiceRegistry,
+    voice1,
+    voice2,
     maleVoice,
     femaleVoice,
     voicesSwapped,
@@ -1313,27 +1587,46 @@ async function preparePipelineInput(config: Pick<
 async function runBackgroundPipeline(
   jobId: string,
   config: PipelineConfig,
-  publicBaseUrl: string
+  publicBaseUrl: string,
+  internalAppBaseUrl: string
 ): Promise<void> {
   const paths = await ensurePodcastVideoArchiveDir(jobId);
   await fs.mkdir(paths.segmentsDir, { recursive: true });
   const workerUrl = `${OMNIVOICE_BASE_URL}/api/v1/podcast-film/jobs`;
 
-  await setPhase(jobId, 'generate_podcast', 'Preparing dialogue and voices…');
-  const prepared = await preparePipelineInput(config);
+  await setPhase(jobId, 'generate_podcast', 'Preparing dialogue and voices…', {
+    current: 0,
+    total: 4,
+  });
+  const prepared = await preparePipelineInput(
+    config,
+    internalAppBaseUrl,
+    async (message, current, total) => {
+      await setPhase(jobId, 'generate_podcast', message, { current, total });
+    }
+  );
   const {
     segments,
     voiceRegistry,
+    voice1: resolvedVoice1,
+    voice2: resolvedVoice2,
     maleVoice,
     femaleVoice,
     voicesSwapped,
   } = prepared;
 
-  await setPhase(jobId, 'fetch_voices_images', 'Loading avatar images…');
+  await setPhase(jobId, 'fetch_voices_images', 'Loading avatar images…', {
+    current: 0,
+    total: 2,
+  });
   const [womanFiles, menFiles] = await Promise.all([
     fetchImageList('Woman'),
     fetchImageList('Men'),
   ]);
+  await setPhase(jobId, 'fetch_voices_images', 'Loading avatar images…', {
+    current: 2,
+    total: 2,
+  });
   const snapshots = new Map<string, string[]>([
     ['Woman', womanFiles],
     ['Men', menFiles],
@@ -1345,40 +1638,107 @@ async function runBackgroundPipeline(
     cursors.set('Men', menFiles.length ? base % menFiles.length : 0);
   }
 
-  await setPhase(jobId, 'omnivoice_tts', 'Synthesizing voice audio…');
-  const workerStartedAt = Date.now();
-  let workerRes;
-  try {
-    workerRes = await undiciFetch(workerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ script_segments: segments }),
-      signal: AbortSignal.timeout(OMNIVOICE_JOB_TIMEOUT_MS),
-      dispatcher: OMNIVOICE_JOB_DISPATCHER,
-    });
-  } catch (error) {
-    throw new Error(`Failed to reach OmniVoice worker (${workerUrl}): ${describeError(error)}`);
-  }
-  if (!workerRes.ok) {
-    const txt = await workerRes.text();
-    throw new Error(`OmniVoice worker returned ${workerRes.status}: ${txt.slice(0, 500)}`);
-  }
-  const workerData = (await workerRes.json()) as {
-    job_id: string;
-    manifest: {
-      segments: Array<{
-        segment_id: string;
-        speaker: string;
-        audio_file: string;
-        duration_seconds: number;
-        start_time_seconds: number;
-        end_time_seconds: number;
-      }>;
-    };
-  };
-  const workerElapsedMs = Date.now() - workerStartedAt;
+  await setPhase(
+    jobId,
+    'omnivoice_tts',
+    config.ttsEngine === 'omnivoice'
+      ? 'Synthesizing voice audio…'
+      : `Synthesizing ${config.ttsEngine === 'gemini' ? 'Gemini' : 'ElevenLabs'} audio 0/${segments.length}…`,
+    config.ttsEngine === 'omnivoice'
+      ? null
+      : {
+          current: 0,
+          total: segments.length,
+        }
+  );
 
-  const totalSegs = workerData.manifest.segments.length;
+  let workerData:
+    | {
+        job_id: string;
+        manifest: {
+          segments: Array<{
+            segment_id: string;
+            speaker: string;
+            audio_file: string;
+            duration_seconds: number;
+            start_time_seconds: number;
+            end_time_seconds: number;
+          }>;
+        };
+      }
+    | null = null;
+  let workerElapsedMs: number | undefined;
+  let directData: GeminiSynthesisResult | null = null;
+
+  if (config.ttsEngine === 'gemini') {
+    const geminiApiKey = resolvePodcastFilmGeminiApiKey(config.geminiApiKey);
+    if (!geminiApiKey) {
+      throw new PipelineInputError(403, {
+        error: 'Gemini API key is not configured for podcast-film.',
+      });
+    }
+    directData = await synthesizeSegmentsWithGemini(
+      jobId,
+      paths.dir,
+      segments,
+      geminiApiKey,
+      config.geminiStyle,
+      config.geminiTempo
+    );
+  } else if (config.ttsEngine === 'elevenlabs') {
+    const elevenlabsApiKey = resolvePodcastFilmElevenLabsApiKey(config.elevenlabsApiKey);
+    if (!elevenlabsApiKey) {
+      throw new PipelineInputError(403, {
+        error: 'ElevenLabs API key is not configured for podcast-film.',
+      });
+    }
+    directData = await synthesizeSegmentsWithElevenLabs(
+      jobId,
+      paths.dir,
+      segments,
+      elevenlabsApiKey,
+      config.ttsModel
+    );
+  } else {
+    const workerStartedAt = Date.now();
+    let workerRes;
+    try {
+      workerRes = await undiciFetch(workerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({ script_segments: segments }),
+        signal: AbortSignal.timeout(OMNIVOICE_JOB_TIMEOUT_MS),
+        dispatcher: OMNIVOICE_JOB_DISPATCHER,
+      });
+    } catch (error) {
+      throw new Error(`Failed to reach OmniVoice worker (${workerUrl}): ${describeError(error)}`);
+    }
+    if (!workerRes.ok) {
+      const txt = await workerRes.text();
+      throw new Error(`OmniVoice worker returned ${workerRes.status}: ${txt.slice(0, 500)}`);
+    }
+    workerData = (await workerRes.json()) as {
+      job_id: string;
+      manifest: {
+        segments: Array<{
+          segment_id: string;
+          speaker: string;
+          audio_file: string;
+          duration_seconds: number;
+          start_time_seconds: number;
+          end_time_seconds: number;
+        }>;
+      };
+    };
+    workerElapsedMs = Date.now() - workerStartedAt;
+  }
+
+  const manifestSegments =
+    config.ttsEngine === 'omnivoice'
+      ? workerData!.manifest.segments
+      : directData!.segments;
+
+  const totalSegs = manifestSegments.length;
   await setPhase(jobId, 'soulx_talkhead', `Rendering avatar 0/${totalSegs}…`, {
     current: 0,
     total: totalSegs,
@@ -1397,17 +1757,25 @@ async function runBackgroundPipeline(
   }> = [];
   const renderStartedAt = Date.now();
   for (let i = 0; i < totalSegs; i++) {
-    const seg = workerData.manifest.segments[i];
+    const seg = manifestSegments[i];
     const voice = voiceRegistry.get(seg.speaker.toLowerCase());
     if (!voice) {
       throw new Error(
-        `Voice "${seg.speaker}" from OmniVoice manifest not found in /voices registry`
+        `Voice "${seg.speaker}" from ${config.ttsEngine} synthesis not found in registry`
       );
     }
     const { folder, file } = pickImage(voice, cursors, snapshots, config.pinnedImages);
     const imageUrl = `${OMNIVOICE_BASE_URL}/images/${encodeURIComponent(folder)}/${encodeURIComponent(file)}`;
-    const audioUrl = `${OMNIVOICE_BASE_URL}/api/v1/podcast-film/jobs/${encodeURIComponent(workerData.job_id)}/file?type=segment&name=${encodeURIComponent(seg.audio_file)}`;
-    const [img, aud] = await Promise.all([fetchBytes(imageUrl), fetchBytes(audioUrl)]);
+    const img = await fetchBytes(imageUrl);
+    const aud =
+      config.ttsEngine !== 'omnivoice'
+        ? {
+            buffer: await fs.readFile((seg as GeminiAudioSegment).audio_path),
+            contentType: (seg as GeminiAudioSegment).audio_content_type,
+          }
+        : await fetchBytes(
+            `${OMNIVOICE_BASE_URL}/api/v1/podcast-film/jobs/${encodeURIComponent(workerData!.job_id)}/file?type=segment&name=${encodeURIComponent(seg.audio_file)}`
+          );
     const soulxStart = Date.now();
     const mp4Buf = await renderSegmentViaSoulX({
       imageBuf: img.buffer,
@@ -1458,70 +1826,113 @@ async function runBackgroundPipeline(
   let titleTextFile: string | null = null;
   if (config.title) {
     titleTextFile = path.join(paths.dir, 'title.txt');
-    await fs.writeFile(titleTextFile, wrapTitleText(config.title, 28), 'utf8');
+    await fs.writeFile(titleTextFile, wrapTitleText(config.title.toUpperCase(), 22), 'utf8');
   }
   await compositeOnCover(concatMp4Path, compositeMp4Path, titleTextFile);
   const compositeElapsedMs = Date.now() - compositeStart;
   await fs.rename(compositeMp4Path, finalMp4Path);
 
-  const srtBody = buildSrtFromSegments(
+  const directClassicAlignmentMode = resolveDirectClassicAlignmentMode(config.ttsEngine);
+  const useDirectClassicBaseline =
+    config.ttsEngine !== 'omnivoice' &&
+    config.captionStyle === 'classic' &&
+    directClassicAlignmentMode === 'segment_cues';
+  const segmentCaptionTimings = buildSegmentCaptionTimings(
     segmentResults.map((segment) => ({
       text: segment.text,
       duration_seconds: segment.actual_duration_seconds,
     })),
     CAPTION_START_DELAY_SECONDS
   );
-  const srtPath = getPodcastVideoJobPaths(jobId).srt;
-  await fs.writeFile(srtPath, srtBody, 'utf8');
-  const srtUrl = buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'srt');
 
   let captionsElapsedMs: number | undefined;
   const captionWarnings: string[] = [];
+  if (config.ttsEngine !== 'omnivoice' && directData?.caption_warning) {
+    captionWarnings.push(directData.caption_warning);
+  }
   let matchedTotal = 0;
   let unmatchedTotal = 0;
   const globalTokens: DisplayToken[] = [];
+  const captionAlignmentMode =
+    config.captionsMode !== 'burn' || config.captionStyle === 'off'
+      ? 'disabled'
+      : config.ttsEngine === 'omnivoice'
+        ? 'whisper_reconciled'
+        : config.captionStyle === 'classic'
+          ? directClassicAlignmentMode
+          : 'word_estimated';
   if (config.captionsMode === 'burn' && config.captionStyle !== 'off') {
-    await setPhase(jobId, 'whisper_align', `Aligning word timing 0/${segmentResults.length}…`, {
-      current: 0,
-      total: segmentResults.length,
-    });
+    const alignmentPhaseLabel =
+      config.ttsEngine === 'omnivoice'
+        ? 'Aligning word timing'
+        : config.captionStyle === 'classic'
+          ? useDirectClassicBaseline
+            ? 'Building segment cue timing'
+            : 'Estimating pseudo-token timing'
+          : 'Estimating word timing';
+    await setPhase(
+      jobId,
+      'whisper_align',
+      `${alignmentPhaseLabel} 0/${segmentResults.length}…`,
+      {
+        current: 0,
+        total: segmentResults.length,
+      }
+    );
     let cumulativeOffset = 0;
     let idCursor = 0;
     for (let i = 0; i < segmentResults.length; i++) {
       const segment = segmentResults[i];
-      const manifestSeg = workerData.manifest.segments[i];
       const segDuration = segment.actual_duration_seconds;
       const segStart = cumulativeOffset;
       const segEnd = cumulativeOffset + segDuration;
-      let whisperWords: WhisperWord[] = [];
-      try {
-        whisperWords = await transcribeSegmentWords(
-          workerData.job_id,
-          manifestSeg.audio_file,
-          config.captionLanguage
+
+      if (config.ttsEngine !== 'omnivoice') {
+        if (!useDirectClassicBaseline) {
+          const tokens = estimateSegmentWordTimings(
+            segment.text,
+            segStart,
+            segEnd,
+            i,
+            idCursor
+          );
+          matchedTotal += tokens.length;
+          idCursor += tokens.length;
+          globalTokens.push(...tokens);
+        }
+      } else {
+        const manifestSeg = workerData!.manifest.segments[i];
+        let whisperWords: WhisperWord[] = [];
+        try {
+          whisperWords = await transcribeSegmentWords(
+            workerData!.job_id,
+            manifestSeg.audio_file,
+            config.captionLanguage
+          );
+        } catch (error) {
+          captionWarnings.push(
+            `transcribe-words failed for ${manifestSeg.audio_file}: ${describeError(error).slice(0, 160)}`
+          );
+        }
+        const { tokens, matched, unmatched } = matchScriptToWhisperWords(
+          segment.text,
+          whisperWords,
+          segStart,
+          segEnd,
+          i,
+          idCursor
         );
-      } catch (error) {
-        captionWarnings.push(
-          `transcribe-words failed for ${manifestSeg.audio_file}: ${describeError(error).slice(0, 160)}`
-        );
+        matchedTotal += matched;
+        unmatchedTotal += unmatched;
+        idCursor += tokens.length;
+        globalTokens.push(...tokens);
       }
-      const { tokens, matched, unmatched } = matchScriptToWhisperWords(
-        segment.text,
-        whisperWords,
-        segStart,
-        segEnd,
-        i,
-        idCursor
-      );
-      matchedTotal += matched;
-      unmatchedTotal += unmatched;
-      idCursor += tokens.length;
-      globalTokens.push(...tokens);
+
       cumulativeOffset = segEnd;
       await setPhase(
         jobId,
         'whisper_align',
-        `Aligning word timing ${i + 1}/${segmentResults.length}…`,
+        `${alignmentPhaseLabel} ${i + 1}/${segmentResults.length}…`,
         {
           current: i + 1,
           total: segmentResults.length,
@@ -1544,34 +1955,67 @@ async function runBackgroundPipeline(
       fontName: 'DejaVu Sans',
       visibleWords: 2,
     };
+    const classicCueGroups =
+      config.captionStyle === 'classic'
+        ? useDirectClassicBaseline
+          ? buildClassicCueGroupsFromTimedSegments(segmentCaptionTimings, style.fontSize)
+          : buildClassicCueGroupsFromDisplayTokens(globalTokens, style.fontSize)
+        : [];
     const assContent =
       config.captionStyle === 'highlight'
         ? buildHighlightAss(globalTokens, style)
-        : buildClassicAss(globalTokens, style);
+        : buildClassicAssFromCueGroups(classicCueGroups, style);
     const assPath = path.join(paths.dir, 'captions.ass');
     await fs.writeFile(assPath, assContent, 'utf8');
-    if (globalTokens.length > 0) {
+    const hasRenderableCaptions =
+      config.captionStyle === 'highlight' ? globalTokens.length > 0 : classicCueGroups.length > 0;
+    if (hasRenderableCaptions) {
       await setPhase(jobId, 'burn_subs', 'Burning captions into video…');
       const tmpMp4 = path.join(paths.dir, 'final_captioned.mp4');
       const result = await burnAssOntoMp4(paths.dir, finalMp4Path, 'captions.ass', tmpMp4);
       captionsElapsedMs = result.elapsed_ms;
       await fs.rename(tmpMp4, finalMp4Path);
     } else {
-      captionWarnings.push('no caption tokens produced — skipping burn');
+      captionWarnings.push('no caption cues produced — skipping burn');
     }
   }
+
+  const srtCueGroups =
+    config.ttsEngine !== 'omnivoice' && config.captionStyle === 'classic'
+      ? directClassicAlignmentMode === 'classic_pseudo_token'
+        ? globalTokens.length > 0
+          ? buildClassicCueGroupsFromDisplayTokens(globalTokens, config.captionFontSize)
+          : buildClassicPseudoCueGroupsFromTimedSegments(
+              segmentCaptionTimings,
+              config.captionFontSize
+            ).cues
+        : buildClassicCueGroupsFromTimedSegments(segmentCaptionTimings, config.captionFontSize)
+      : buildClassicCueGroupsFromTimedSegments(segmentCaptionTimings, 47);
+  const srtBody = buildSrtFromCueGroups(srtCueGroups);
+  const srtPath = getPodcastVideoJobPaths(jobId).srt;
+  await fs.writeFile(srtPath, srtBody, 'utf8');
+  const srtUrl = buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'srt');
+
+  const ttsTimingMs =
+    config.ttsEngine === 'omnivoice'
+      ? workerElapsedMs
+      : directData!.elapsed_ms;
 
   await markDone(jobId, {
     success: true,
     pipeline: 'podcast-film-v1',
-    tts_engine: 'omnivoice',
+    tts_engine: config.ttsEngine,
+    direct_tts_model: directData?.model,
+    gemini_model: config.ttsEngine === 'gemini' ? directData?.model : undefined,
     soulx_model: config.soulxModel,
     use_face_crop: config.useFaceCrop,
     image_rotation_seed: config.imageRotationSeed,
     job_id: jobId,
-    omnivoice_job_id: workerData.job_id,
-    voice1: config.voice1,
-    voice2: config.voice2,
+    omnivoice_job_id: workerData?.job_id ?? null,
+    requested_voice1: config.voice1,
+    requested_voice2: config.voice2,
+    voice1: resolvedVoice1,
+    voice2: resolvedVoice2,
     male_voice: maleVoice,
     female_voice: femaleVoice,
     voices_swapped_for_gender: voicesSwapped,
@@ -1585,6 +2029,8 @@ async function runBackgroundPipeline(
     caption_margin_v: config.captionMarginV,
     caption_word_color: config.captionWordColor,
     caption_line_color: config.captionLineColor,
+    caption_timing_mode: config.ttsEngine === 'omnivoice' ? 'whisper' : 'estimated',
+    caption_alignment_mode: captionAlignmentMode,
     caption_warnings: captionWarnings,
     caption_matched_words: matchedTotal,
     caption_unmatched_words: unmatchedTotal,
@@ -1593,7 +2039,10 @@ async function runBackgroundPipeline(
     transition_skipped_reason: concatResult.transition_skipped_reason,
     final_duration_seconds: concatResult.final_duration_seconds,
     timings: {
-      omnivoice_ms: workerElapsedMs,
+      tts_ms: ttsTimingMs,
+      omnivoice_ms: config.ttsEngine === 'omnivoice' ? workerElapsedMs : undefined,
+      gemini_ms: config.ttsEngine === 'gemini' ? directData!.elapsed_ms : undefined,
+      elevenlabs_ms: config.ttsEngine === 'elevenlabs' ? directData!.elapsed_ms : undefined,
       soulx_total_ms: renderElapsedMs,
       concat_ms: concatResult.elapsed_ms,
       concat_mode: concatResult.mode,
@@ -1601,10 +2050,15 @@ async function runBackgroundPipeline(
       captions_ms: captionsElapsedMs,
     },
     worker: {
-      omnivoice_url: workerUrl,
+      omnivoice_url: config.ttsEngine === 'omnivoice' ? workerUrl : null,
       soulx_url: `${SOULX_BASE_URL}/generate`,
     },
-    note: 'v1: per-segment MP4 + concat + word-level ASS captions burned via Whisper timing reconciliation.',
+    note:
+      config.ttsEngine === 'gemini'
+        ? `v1-gemini: per-segment Gemini WAV + SoulX render + ${captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
+        : config.ttsEngine === 'elevenlabs'
+          ? `v1-elevenlabs: per-segment ElevenLabs MP3 + SoulX render + ${captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
+          : 'v1: per-segment MP4 + concat + word-level ASS captions burned via Whisper timing reconciliation.',
   });
 }
 
@@ -1622,21 +2076,58 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const ttsEngine = String(body.tts_engine || 'omnivoice').toLowerCase();
-    if (ttsEngine !== 'omnivoice') {
+    const ttsBody = isPlainObject(body.tts) ? body.tts : {};
+    const avatarBody = isPlainObject(body.avatar) ? body.avatar : {};
+    const reviewBody = isPlainObject(body.review) ? body.review : {};
+    const ttsEngine = normalizeTtsProvider(
+      ttsBody.provider || body.tts_engine || body.ttsProvider || body.provider || 'omnivoice',
+      'omnivoice'
+    ) as TtsEngine;
+    const avatarProvider = normalizeAvatarProvider(avatarBody.provider || 'soulx');
+    const reviewMode = normalizeReviewMode(reviewBody.mode || body.review_mode || body.reviewMode);
+    const transcript = String(body.raw_text || body.transcript || body.script_text || '').trim();
+    const normalizedConversation = normalizeConversationItems(body.conversation);
+    if (normalizedConversation.length > 0 && transcript) {
       return NextResponse.json(
         {
-          error: `tts_engine "${ttsEngine}" not supported (v1). Use "omnivoice".`,
+          error: 'Provide exactly one public input: raw_text or conversation.',
         },
-        { status: 501 }
+        { status: 400 }
       );
     }
-
-    const transcript = String(body.transcript || body.script_text || '').trim();
-    const normalizedConversation = normalizeConversationItems(body.conversation);
     const language = String(body.language || body.caption_language || 'pl').trim() || 'pl';
-    const voice1 = String(body.voice1 || 'host_a');
-    const voice2 = String(body.voice2 || 'host_b');
+    const defaultVoice1 =
+      ttsEngine === 'gemini'
+        ? DEFAULT_GEMINI_VOICES.voice1
+        : ttsEngine === 'elevenlabs'
+          ? DEFAULT_ELEVENLABS_VOICES.voice1
+          : 'host_a';
+    const defaultVoice2 =
+      ttsEngine === 'gemini'
+        ? DEFAULT_GEMINI_VOICES.voice2
+        : ttsEngine === 'elevenlabs'
+          ? DEFAULT_ELEVENLABS_VOICES.voice2
+          : 'host_b';
+    const voice1 = String(ttsBody.voice1 || body.voice1 || defaultVoice1);
+    const voice2 = String(ttsBody.voice2 || body.voice2 || defaultVoice2);
+    const geminiStyle = normalizeGeminiStyle(ttsBody.geminiStyle || body.geminiStyle);
+    const geminiTempo = normalizeGeminiTempo(ttsBody.geminiTempo || body.geminiTempo);
+    const geminiApiKey =
+      typeof (ttsBody.apiKey || body.gemini_api_key) === 'string'
+        ? String(ttsBody.apiKey || body.gemini_api_key).trim()
+        : '';
+    const elevenlabsApiKey =
+      typeof body.elevenlabs_api_key === 'string'
+        ? body.elevenlabs_api_key.trim()
+        : typeof ttsBody.apiKey === 'string' && ttsEngine === 'elevenlabs'
+          ? String(ttsBody.apiKey).trim()
+          : '';
+    const ttsModel =
+      typeof ttsBody.model === 'string'
+        ? String(ttsBody.model).trim()
+        : typeof body.modelId === 'string'
+          ? body.modelId.trim()
+          : '';
     const dryRun = Boolean(body.dry_run ?? body.dryRun ?? false);
     const soulxModelRaw = String(body.soulx_model || 'pro').toLowerCase();
     const soulxModel: 'pro' | 'lite' = soulxModelRaw === 'lite' ? 'lite' : 'pro';
@@ -1681,10 +2172,80 @@ export async function POST(request: NextRequest) {
     if (normalizedConversation.length === 0 && !transcript) {
       return NextResponse.json(
         {
-          error:
-            'No segments produced from conversation[], speaker-marked transcript, or raw-text generation.',
+          error: 'Provide exactly one public input: raw_text or conversation.',
         },
         { status: 400 }
+      );
+    }
+
+    if (avatarProvider !== 'soulx') {
+      return NextResponse.json(
+        {
+          error: `avatar.provider "${avatarProvider}" is not supported yet. Use "soulx".`,
+        },
+        { status: 501 }
+      );
+    }
+
+    await ensureRunningJobRecovery();
+
+    const publicBaseUrl = resolvePublicBaseUrl(request);
+    const internalAppBaseUrl = resolveRequestBaseUrl(request);
+
+    if (reviewMode === 'pause_after_conversation' && transcript && !dryRun) {
+      const conversationDraft = await generateConversationDraft({
+        rawText: transcript,
+        title: title || 'Podcast Film',
+        language,
+        ttsProvider: ttsEngine,
+        geminiStyle,
+        geminiTempo,
+        internalAppBaseUrl,
+        timeoutMs: INTERNAL_GENERATE_PODCAST_TIMEOUT_MS,
+        llmAttemptTimeoutMs: INTERNAL_GENERATE_PODCAST_ATTEMPT_TIMEOUT_MS,
+      });
+
+      return NextResponse.json(
+        {
+          success: true,
+          pipeline: 'podcast-film-v1',
+          review_required: true,
+          review_mode: reviewMode,
+          input_mode: 'raw_text',
+          title,
+          language,
+          tts_engine: ttsEngine,
+          avatar_provider: avatarProvider,
+          conversation: conversationDraft,
+          next_step: {
+            method: 'POST',
+            url: `${publicBaseUrl}/api/podcast-video/podcast-film/jobs`,
+            body: {
+              title,
+              language,
+              conversation: conversationDraft,
+              tts: buildClientTtsConfig({
+                provider: ttsEngine,
+                voice1,
+                voice2,
+                model: ttsModel || undefined,
+                geminiStyle,
+                geminiTempo,
+              }),
+              avatar: {
+                provider: avatarProvider,
+              },
+              review: {
+                mode: 'off',
+              },
+              soulx_model: soulxModel,
+              use_face_crop: useFaceCrop,
+              captions: captionsMode,
+              caption_style: captionStyle,
+            },
+          },
+        },
+        { status: 200 }
       );
     }
 
@@ -1694,7 +2255,15 @@ export async function POST(request: NextRequest) {
       language,
       voice1,
       voice2,
+      ttsEngine,
+      geminiApiKey: geminiApiKey || null,
+      geminiStyle,
+      geminiTempo,
+      elevenlabsApiKey: elevenlabsApiKey || null,
+      ttsModel: ttsModel || null,
       soulxModel,
+      avatarProvider,
+      reviewMode,
       useFaceCrop,
       imageRotationSeed,
       pinnedImages,
@@ -1711,18 +2280,47 @@ export async function POST(request: NextRequest) {
       title,
     };
 
+    if (ttsEngine === 'gemini' && !dryRun && !resolvePodcastFilmGeminiApiKey(geminiApiKey)) {
+      return NextResponse.json(
+        {
+          error: 'Gemini API key is not configured for podcast-film.',
+          code: 'MISSING_GEMINI_KEY',
+        },
+        { status: 403 }
+      );
+    }
+
+    if (
+      ttsEngine === 'elevenlabs' &&
+      !dryRun &&
+      !resolvePodcastFilmElevenLabsApiKey(elevenlabsApiKey)
+    ) {
+      return NextResponse.json(
+        {
+          error: 'ElevenLabs API key is not configured for podcast-film.',
+          code: 'MISSING_ELEVENLABS_KEY',
+        },
+        { status: 403 }
+      );
+    }
+
     if (dryRun) {
       try {
-        const prepared = await preparePipelineInput(config);
+        const prepared = await preparePipelineInput(config, internalAppBaseUrl);
         return NextResponse.json({
           success: true,
           pipeline: 'podcast-film-v1',
+          tts_engine: ttsEngine,
+          avatar_provider: avatarProvider,
+          review_mode: reviewMode,
           dry_run: true,
           segments_count: prepared.segments.length,
           soulx_model: soulxModel,
           use_face_crop: useFaceCrop,
-          voice1,
-          voice2,
+          requested_voice1: voice1,
+          requested_voice2: voice2,
+          voice1: prepared.voice1,
+          voice2: prepared.voice2,
           male_voice: prepared.maleVoice,
           female_voice: prepared.femaleVoice,
           voices_swapped_for_gender: prepared.voicesSwapped,
@@ -1745,7 +2343,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const workerChecks = await runWorkerPreflightChecks();
+    const workerChecks = await runWorkerPreflightChecks(ttsEngine);
     const failedWorkerChecks = workerChecks.filter((check) => !check.ok);
     if (failedWorkerChecks.length > 0) {
       const detail = failedWorkerChecks
@@ -1763,11 +2361,10 @@ export async function POST(request: NextRequest) {
 
     const jobId = `pbfilm_${randomUUID().replace(/-/g, '')}`;
     await initStatus(jobId);
-    const publicBaseUrl = resolvePublicBaseUrl(request);
 
     void (async () => {
       try {
-        await runBackgroundPipeline(jobId, config, publicBaseUrl);
+        await runBackgroundPipeline(jobId, config, publicBaseUrl, internalAppBaseUrl);
       } catch (error) {
         console.error(`[podcast-film] job ${jobId} failed:`, error);
         const cur = await readStatus(jobId);
@@ -1787,7 +2384,9 @@ export async function POST(request: NextRequest) {
       {
         success: true,
         pipeline: 'podcast-film-v1',
-        tts_engine: 'omnivoice',
+        tts_engine: ttsEngine,
+        avatar_provider: avatarProvider,
+        review_mode: reviewMode,
         soulx_model: soulxModel,
         use_face_crop: useFaceCrop,
         image_rotation_seed: imageRotationSeed,
