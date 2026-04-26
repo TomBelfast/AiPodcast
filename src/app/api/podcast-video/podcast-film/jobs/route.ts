@@ -1219,20 +1219,37 @@ async function compositeOnCover(
     await generateTitleOverlayPng(rawTitle, titleOverlayPng);
   }
 
-  const baseFilter = `[0:v]scale=${COVER_OVERLAY_W}:${COVER_OVERLAY_W}:flags=lanczos,crop=${COVER_OVERLAY_W}:${COVER_OVERLAY_H}:0:${(COVER_OVERLAY_W - COVER_OVERLAY_H) / 2}[fg];[1:v][fg]overlay=0:${COVER_OVERLAY_Y}[bg]`;
-  const filterComplex = titleOverlayPng
-    ? `${baseFilter};[bg][2:v]overlay=0:0:enable='between(t,0,${CAPTION_START_DELAY_SECONDS})'`
-    : `${baseFilter.replace('[bg]', '')}`;
+  // Shine: periodic left→right light sweep over "Ai podcast" logo (top COVER_OVERLAY_Y px), every 15 s
+  // floor-based modulo avoids fmod() which is unavailable in ffmpeg 5.1 geq expressions
+  const tMod = 'T-floor(T/15.0)*15.0';
+  const shineSrc = `color=white:s=${COVER_OVERLAY_W}x${COVER_OVERLAY_Y}:r=30,format=rgba,geq=r=255:g=255:b=255:a=180*exp(-(((X/W-(T-floor(T/15.0)*15.0)/1.2)*(X/W-(T-floor(T/15.0)*15.0)/1.2))*40))*(1/(1+exp(1000*((T-floor(T/15.0)*15.0)-1.2))))`;
 
-  const ffmpegArgs = titleOverlayPng
-    ? ['-y', '-i', concatMp4, '-i', COVER_TEMPLATE_PATH, '-i', titleOverlayPng,
-        '-filter_complex', filterComplex,
-        '-map', '0:a?', '-c:a', 'copy', '-c:v', 'libx264', '-preset', 'medium',
-        '-crf', '18', '-pix_fmt', 'yuv420p', '-shortest', outputMp4]
-    : ['-y', '-i', concatMp4, '-i', COVER_TEMPLATE_PATH,
-        '-filter_complex', filterComplex,
-        '-map', '0:a?', '-c:a', 'copy', '-c:v', 'libx264', '-preset', 'medium',
-        '-crf', '18', '-pix_fmt', 'yuv420p', '-shortest', outputMp4];
+  const baseFilter = `[0:v]scale=${COVER_OVERLAY_W}:${COVER_OVERLAY_W}:flags=lanczos,crop=${COVER_OVERLAY_W}:${COVER_OVERLAY_H}:0:${(COVER_OVERLAY_W - COVER_OVERLAY_H) / 2}[fg];[1:v][fg]overlay=0:${COVER_OVERLAY_Y}[bg]`;
+
+  let filterComplex: string;
+  let ffmpegArgs: string[];
+
+  if (titleOverlayPng) {
+    // inputs: [0]=video [1]=cover [2]=titlePng [3]=shine
+    filterComplex = `${baseFilter};[bg][2:v]overlay=0:0:enable='between(t,0,${CAPTION_START_DELAY_SECONDS})'[titled];[titled][3:v]overlay=0:0`;
+    ffmpegArgs = [
+      '-y', '-i', concatMp4, '-i', COVER_TEMPLATE_PATH, '-i', titleOverlayPng,
+      '-f', 'lavfi', '-i', shineSrc,
+      '-filter_complex', filterComplex,
+      '-map', '0:a?', '-c:a', 'copy', '-c:v', 'libx264', '-preset', 'medium',
+      '-crf', '18', '-pix_fmt', 'yuv420p', '-shortest', outputMp4,
+    ];
+  } else {
+    // inputs: [0]=video [1]=cover [2]=shine
+    filterComplex = `${baseFilter};[bg][2:v]overlay=0:0`;
+    ffmpegArgs = [
+      '-y', '-i', concatMp4, '-i', COVER_TEMPLATE_PATH,
+      '-f', 'lavfi', '-i', shineSrc,
+      '-filter_complex', filterComplex,
+      '-map', '0:a?', '-c:a', 'copy', '-c:v', 'libx264', '-preset', 'medium',
+      '-crf', '18', '-pix_fmt', 'yuv420p', '-shortest', outputMp4,
+    ];
+  }
 
   await new Promise<void>((resolve, reject) => {
     const proc = spawn('ffmpeg', ffmpegArgs);
