@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabase';
 interface UserSettings {
     openai_api_key?: string;
     elevenlabs_api_key?: string;
+    gemini_api_key?: string;
     main_prompt?: string;
     polish_ending_prompt?: string;
     host_prompt_polish?: string;
@@ -41,9 +42,7 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
 
     // Update message when initialMessage changes
     useEffect(() => {
-        if (initialMessage) {
-            setMessage(initialMessage);
-        }
+        setMessage(initialMessage || '');
     }, [initialMessage]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -78,9 +77,10 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
                 setMessage('');
                 onClose();
             }, 1500);
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error('Error saving settings:', error);
-            setMessage(`ERROR: ${error.message || 'FAILED TO SAVE'}`);
+            const message = error instanceof Error ? error.message : 'FAILED TO SAVE';
+            setMessage(`ERROR: ${message}`);
         } finally {
             setLoading(false);
         }
@@ -91,7 +91,8 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
     // FIELD LABELS MAP
     const fieldLabels: Record<keyof UserSettings, string> = {
         openai_api_key: 'LLM Provider Key',
-        elevenlabs_api_key: 'Voice Synthesis Key',
+        elevenlabs_api_key: 'ElevenLabs Voice Key',
+        gemini_api_key: 'Gemini TTS Key',
         main_prompt: 'System Prompt (Main Guidelines)',
         host_prompt_polish: 'Host Persona (Polish)',
         host_prompt_other: 'Host Persona (General)',
@@ -219,7 +220,7 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
                                 <div className="space-y-3 group">
                                     <div className="flex justify-between items-end">
                                         <label className="text-base text-green-500 uppercase font-bold tracking-wider group-focus-within:text-green-400 transition-colors">
-                                            Voice Synthesis Key
+                                            ElevenLabs Voice Key
                                         </label>
                                         <a
                                             href="https://elevenlabs.io/app/settings/api-keys"
@@ -242,7 +243,37 @@ export const UserSettingsModal: React.FC<UserSettingsModalProps> = ({
                                         <div className="absolute right-4 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-green-500/20 group-focus-within:bg-green-500 shadow-[0_0_10px_rgba(74,222,128,0.5)] transition-all" />
                                     </div>
                                     <p className="text-xs text-zinc-500">
-                                        Required for voices.
+                                        Required for ElevenLabs voices.
+                                    </p>
+                                </div>
+
+                                <div className="space-y-3 group">
+                                    <div className="flex justify-between items-end">
+                                        <label className="text-base text-green-500 uppercase font-bold tracking-wider group-focus-within:text-green-400 transition-colors">
+                                            Gemini TTS Key
+                                        </label>
+                                        <a
+                                            href="https://aistudio.google.com/apikey"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="text-xs text-zinc-400 hover:text-green-400 transition-all hover:underline"
+                                        >
+                                            GET GEMINI KEY
+                                        </a>
+                                    </div>
+                                    <div className="relative">
+                                        <input
+                                            type="password"
+                                            name="gemini_api_key"
+                                            value={settings.gemini_api_key || ''}
+                                            onChange={handleChange}
+                                            placeholder="AIza..."
+                                            className="w-full bg-black/40 border border-white/10 rounded-lg p-5 text-white text-lg focus:border-green-500 focus:shadow-[0_0_20px_rgba(74,222,128,0.1)] outline-none transition-all placeholder-zinc-700 font-mono"
+                                        />
+                                        <div className="absolute right-4 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-green-500/20 group-focus-within:bg-green-500 shadow-[0_0_10px_rgba(74,222,128,0.5)] transition-all" />
+                                    </div>
+                                    <p className="text-xs text-zinc-500">
+                                        Required for Gemini TTS. Add only the providers you want to use.
                                     </p>
                                 </div>
                             </div>

@@ -4,6 +4,14 @@ import path from 'path';
 
 const ARCHIVE_DIR = path.join(process.cwd(), 'archive');
 
+function getContentTypeForFilename(filename: string): string {
+  if (filename.toLowerCase().endsWith('.wav')) {
+    return 'audio/wav';
+  }
+
+  return 'audio/mpeg';
+}
+
 // GET - Download a specific archived file
 export async function GET(
   req: NextRequest,
@@ -38,7 +46,7 @@ export async function GET(
     // Return file with appropriate headers
     return new NextResponse(new Uint8Array(fileBuffer), {
       headers: {
-        'Content-Type': 'audio/mpeg',
+        'Content-Type': getContentTypeForFilename(filename),
         'Content-Disposition': `attachment; filename="${filename}"`,
         'Content-Length': fileBuffer.length.toString(),
       },
@@ -51,4 +59,3 @@ export async function GET(
     );
   }
 }
-

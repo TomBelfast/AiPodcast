@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+function errorDetails(error: unknown): { message: string; stack?: string } {
+  return {
+    message: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined,
+  };
+}
+
 // GET - Test MinIO connection
 export async function GET(req: NextRequest) {
   try {
     // Dynamic import for MinIO
-    const minioModule = await import('minio');
-    const MinIO = (minioModule as any).default || minioModule;
+    const { Client } = await import('minio');
     
     // Parse endpoint - Nginx proxies external address to internal port 9002
     let endPoint = process.env.MINIO_ENDPOINT || 'minio2-api.aihub.ovh';
@@ -25,9 +31,16 @@ export async function GET(req: NextRequest) {
     }
 
     // Use provided credentials or environment variables
-    const accessKey = req.nextUrl.searchParams.get('accessKey') || process.env.MINIO_ACCESS_KEY || 'login';
-    const secretKey = req.nextUrl.searchParams.get('secretKey') || process.env.MINIO_SECRET_KEY || 'Swiat1976';
+    const accessKey = req.nextUrl.searchParams.get('accessKey') || process.env.MINIO_ACCESS_KEY;
+    const secretKey = req.nextUrl.searchParams.get('secretKey') || process.env.MINIO_SECRET_KEY;
     const bucketName = process.env.MINIO_BUCKET_NAME || 'podcast';
+
+    if (!accessKey || !secretKey) {
+      return NextResponse.json({
+        success: false,
+        error: 'MinIO credentials are missing. Set MINIO_ACCESS_KEY and MINIO_SECRET_KEY.',
+      }, { status: 500 });
+    }
 
     console.log('Testing MinIO connection:', {
       endPoint,
@@ -37,7 +50,7 @@ export async function GET(req: NextRequest) {
       accessKey: accessKey.substring(0, 3) + '***', // Don't log full key
     });
 
-    const minioClient = new MinIO.Client({
+    const minioClient = new Client({
       endPoint,
       port,
       useSSL,
@@ -46,15 +59,16 @@ export async function GET(req: NextRequest) {
     });
 
     // Test 1: List buckets
-    let buckets: string[] = [];
+    let buckets: unknown[] = [];
     try {
       buckets = await minioClient.listBuckets();
-      console.log('Buckets found:', buckets.map(b => b.name));
-    } catch (error: any) {
+      console.log('Buckets found:', buckets);
+    } catch (error: unknown) {
+      const details = errorDetails(error);
       return NextResponse.json({
         success: false,
         error: 'Failed to list buckets',
-        details: error.message,
+        details: details.message,
         connection: {
           endPoint,
           port,
@@ -72,12 +86,13 @@ export async function GET(req: NextRequest) {
         bucketExists = true;
         console.log(`Bucket ${bucketName} created successfully`);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const details = errorDetails(error);
       return NextResponse.json({
         success: false,
         error: `Failed to check/create bucket: ${bucketName}`,
-        details: error.message,
-        buckets: buckets.map(b => b.name),
+        details: details.message,
+        buckets,
       }, { status: 500 });
     }
 
@@ -101,13 +116,14 @@ export async function GET(req: NextRequest) {
       // Clean up test file
       await minioClient.removeObject(bucketName, testFileName);
       console.log('Test file removed');
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const details = errorDetails(error);
       return NextResponse.json({
         success: false,
         error: 'Failed to upload test file',
-        details: error.message,
+        details: details.message,
         bucketExists,
-        buckets: buckets.map(b => b.name),
+        buckets,
       }, { status: 500 });
     }
 
@@ -120,21 +136,21 @@ export async function GET(req: NextRequest) {
         useSSL,
         bucketName,
       },
-      buckets: buckets.map(b => b.name),
+      buckets,
       bucketExists,
       uploadTest: {
         success: uploadSuccess,
         presignedUrlGenerated: !!presignedUrl,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const details = errorDetails(error);
     console.error('MinIO test error:', error);
     return NextResponse.json({
       success: false,
       error: 'Failed to connect to MinIO',
-      details: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+      details: details.message,
+      stack: process.env.NODE_ENV === 'development' ? details.stack : undefined,
     }, { status: 500 });
   }
 }
-

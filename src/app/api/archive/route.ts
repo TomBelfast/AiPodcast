@@ -4,6 +4,18 @@ import path from 'path';
 
 const ARCHIVE_DIR = path.join(process.cwd(), 'archive');
 
+function getMimeTypeFromDataUrl(audioBase64: string): 'audio/mpeg' | 'audio/wav' {
+  if (audioBase64.startsWith('data:audio/wav')) {
+    return 'audio/wav';
+  }
+
+  return 'audio/mpeg';
+}
+
+function getExtensionForMimeType(mimeType: 'audio/mpeg' | 'audio/wav'): 'mp3' | 'wav' {
+  return mimeType === 'audio/wav' ? 'wav' : 'mp3';
+}
+
 // Ensure archive directory exists
 async function ensureArchiveDir() {
   try {
@@ -21,7 +33,7 @@ export async function GET() {
     
     const fileList = await Promise.all(
       files
-        .filter(file => file.endsWith('.mp3'))
+        .filter(file => file.endsWith('.mp3') || file.endsWith('.wav'))
         .map(async (file) => {
           const filePath = path.join(ARCHIVE_DIR, file);
           const stats = await fs.stat(filePath);
@@ -67,13 +79,15 @@ export async function POST(req: NextRequest) {
     
     // Convert base64 to buffer
     const audioBuffer = Buffer.from(base64Data, 'base64');
+    const mimeType = getMimeTypeFromDataUrl(audioBase64);
+    const extension = getExtensionForMimeType(mimeType);
     
     // Generate filename with timestamp
     const timestamp = Date.now();
     const safeTitle = title 
       ? title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)
       : 'podcast';
-    const filename = `${safeTitle}_${timestamp}.mp3`;
+    const filename = `${safeTitle}_${timestamp}.${extension}`;
     const filePath = path.join(ARCHIVE_DIR, filename);
     
     // Save audio file
@@ -88,6 +102,7 @@ export async function POST(req: NextRequest) {
         conversation,
         createdAt: new Date().toISOString(),
         audioFile: filename,
+        mimeType,
       }, null, 2)
     );
     
@@ -142,7 +157,7 @@ export async function DELETE(req: NextRequest) {
     await fs.unlink(filePath);
     
     // Also try to delete metadata file if it exists
-    const metadataPath = filePath.replace('.mp3', '.json');
+    const metadataPath = filePath.replace(/\.(mp3|wav)$/i, '.json');
     try {
       await fs.unlink(metadataPath);
     } catch {
@@ -161,4 +176,3 @@ export async function DELETE(req: NextRequest) {
     );
   }
 }
-

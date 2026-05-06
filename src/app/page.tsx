@@ -4,6 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DialogueInput } from '@/types';
 import { UserSettingsModal } from '@/components/settings/UserSettingsModal';
 import { supabase } from '@/lib/supabase';
+import {
+  DEFAULT_ELEVENLABS_VOICES,
+  DEFAULT_GEMINI_VOICES,
+  type TtsProvider,
+  type VoiceOption,
+} from '@/lib/voice-catalog';
 
 // LocalStorage helpers
 const STORAGE_KEYS = {
@@ -13,8 +19,11 @@ const STORAGE_KEYS = {
 
 interface Settings {
   language: string;
+  ttsProvider: TtsProvider;
   selectedVoice1: string;
   selectedVoice2: string;
+  geminiStyle?: 'plain' | 'expressive-lite';
+  geminiTempo?: 'normal' | 'fast';
   autoGenerateAudio: boolean;
   url: string;
   useTranscript: boolean;
@@ -30,8 +39,42 @@ interface HistoryItem {
   filename: string;
   createdAt: string;
   size?: number;
+  mimeType?: string;
   audioBase64?: string; // Store small preview or metadata only
   conversation?: Array<{ speaker: string; text: string }>;
+}
+
+const DEFAULT_FALLBACK_VOICES: Record<TtsProvider, VoiceOption[]> = {
+  elevenlabs: [
+    { id: DEFAULT_ELEVENLABS_VOICES.voice1, name: 'Ślązak', provider: 'elevenlabs', category: 'custom', genderBucket: 'male' },
+    { id: DEFAULT_ELEVENLABS_VOICES.voice2, name: 'Góralka', provider: 'elevenlabs', category: 'custom', genderBucket: 'female' },
+  ],
+  gemini: [
+    { id: DEFAULT_GEMINI_VOICES.voice1, name: 'Charon', provider: 'gemini', category: 'prebuilt', genderBucket: 'male', style: 'Informative' },
+    { id: DEFAULT_GEMINI_VOICES.voice2, name: 'Kore', provider: 'gemini', category: 'prebuilt', genderBucket: 'female', style: 'Firm' },
+  ],
+};
+
+function getDefaultVoicesForProvider(provider: TtsProvider) {
+  return provider === 'gemini'
+    ? DEFAULT_GEMINI_VOICES
+    : DEFAULT_ELEVENLABS_VOICES;
+}
+
+function inferAudioMimeType(audioDataUrl: string | null, explicitMimeType?: string | null): string {
+  if (explicitMimeType) {
+    return explicitMimeType;
+  }
+
+  if (audioDataUrl?.startsWith('data:audio/wav')) {
+    return 'audio/wav';
+  }
+
+  return 'audio/mpeg';
+}
+
+function getAudioExtension(mimeType: string): 'mp3' | 'wav' {
+  return mimeType === 'audio/wav' ? 'wav' : 'mp3';
 }
 
 const loadSettings = (): Partial<Settings> => {
@@ -254,24 +297,23 @@ export default function Home() {
   const [conversation, setConversation] = useState<Array<{ speaker: string; text: string }> | null>(null);
   const [isConversationComplete, setIsConversationComplete] = useState(false);
   const [scrapedContent, setScrapedContent] = useState<{ content: string; title: string } | null>(null);
-  const [editedContent, setEditedContent] = useState<string>('');
-  const [isEditingContent, setIsEditingContent] = useState(false);
   const [editedConversation, setEditedConversation] = useState<string>('');
   const [isEditingConversation, setIsEditingConversation] = useState(false);
   const [hasRequestedAudio, setHasRequestedAudio] = useState(false);
   const [hasDownloadedAudio, setHasDownloadedAudio] = useState(false);
   const [conversationTurns, setConversationTurns] = useState(0);
   const [autoGenerateAudio, setAutoGenerateAudio] = useState(savedSettings.autoGenerateAudio || false);
-  const prevTurnsRef = useRef(0);
-  const [newStartIndex, setNewStartIndex] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [transcript, setTranscript] = useState<string>('');
   const [customTitle, setCustomTitle] = useState<string>('');
   const [useTranscript, setUseTranscript] = useState(savedSettings.useTranscript || false);
-  const [availableVoices, setAvailableVoices] = useState<Array<{ id: string; name: string; category?: string }>>([]);
-  const [selectedVoice1, setSelectedVoice1] = useState<string>(savedSettings.selectedVoice1 || 'FF7KdobWPaiR0vkcALHF'); // Custom voice - default
-  const [selectedVoice2, setSelectedVoice2] = useState<string>(savedSettings.selectedVoice2 || 'BpjGufoPiobT79j2vtj4'); // Custom voice 2 - default
+  const [ttsProvider, setTtsProvider] = useState<TtsProvider>(savedSettings.ttsProvider || 'elevenlabs');
+  const [availableVoices, setAvailableVoices] = useState<VoiceOption[]>([]);
+  const [selectedVoice1, setSelectedVoice1] = useState<string>(savedSettings.selectedVoice1 || DEFAULT_ELEVENLABS_VOICES.voice1);
+  const [selectedVoice2, setSelectedVoice2] = useState<string>(savedSettings.selectedVoice2 || DEFAULT_ELEVENLABS_VOICES.voice2);
+  const [geminiStyle, setGeminiStyle] = useState<'plain' | 'expressive-lite'>(savedSettings.geminiStyle || 'expressive-lite');
+  const [geminiTempo, setGeminiTempo] = useState<'normal' | 'fast'>(savedSettings.geminiTempo || 'fast');
   const [showArchive, setShowArchive] = useState(false);
   const [archivedFiles, setArchivedFiles] = useState<Array<{ name: string; size: number; createdAt: string; modifiedAt: string }>>([]);
   const [localHistory, setLocalHistory] = useState<HistoryItem[]>([]);
@@ -284,11 +326,14 @@ export default function Home() {
   const [hostPersonalitiesPromptOther, setHostPersonalitiesPromptOther] = useState<string>(savedSettings.hostPersonalitiesPromptOther || defaultPrompts.hostPersonalitiesPromptOther);
   const [showPromptSettings, setShowPromptSettings] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [userSettings, setUserSettings] = useState<any>({});
+  const [, setUserSettings] = useState<Record<string, unknown>>({});
   const [openaiApiKey, setOpenaiApiKey] = useState<string | undefined>(undefined);
   const [elevenlabsApiKey, setElevenlabsApiKey] = useState<string | undefined>(undefined);
+  const [geminiApiKey, setGeminiApiKey] = useState<string | undefined>(undefined);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [charactersUsed, setCharactersUsed] = useState<number | null>(null);
+  const [audioMimeType, setAudioMimeType] = useState<string | null>(null);
+  const canUseGemini = Boolean(geminiApiKey?.trim()) || ttsProvider === 'gemini';
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -301,7 +346,7 @@ export default function Home() {
       if (session) {
         const isAdmin = session.user.email === 'tomaszpasiekauk@gmail.com';
 
-        const { data, error } = await supabase
+        const { data } = await supabase
           .from('user_settings')
           .select('*')
           .eq('user_id', session.user.id)
@@ -311,13 +356,14 @@ export default function Home() {
           setUserSettings(data);
           setOpenaiApiKey(data.openai_api_key);
           setElevenlabsApiKey(data.elevenlabs_api_key);
+          setGeminiApiKey(data.gemini_api_key);
           if (data.main_prompt) setMainPrompt(data.main_prompt);
           if (data.polish_ending_prompt) setPolishEndingPrompt(data.polish_ending_prompt);
           if (data.host_prompt_polish) setHostPersonalitiesPromptPolish(data.host_prompt_polish);
           if (data.host_prompt_other) setHostPersonalitiesPromptOther(data.host_prompt_other);
 
-          // Auto-open modal if keys are missing (unless admin)
-          if (!data.openai_api_key || !data.elevenlabs_api_key) {
+          // Auto-open modal if the required LLM key or all TTS keys are missing.
+          if (!data.openai_api_key || (!data.elevenlabs_api_key && !data.gemini_api_key)) {
             if (isAdmin) {
               // Admin: Sync from env if missing in DB
               try {
@@ -374,8 +420,11 @@ export default function Home() {
   useEffect(() => {
     saveSettings({
       language,
+      ttsProvider,
       selectedVoice1,
       selectedVoice2,
+      geminiStyle,
+      geminiTempo,
       autoGenerateAudio,
       url,
       useTranscript,
@@ -384,34 +433,63 @@ export default function Home() {
       hostPersonalitiesPromptPolish,
       hostPersonalitiesPromptOther,
     });
-  }, [language, selectedVoice1, selectedVoice2, autoGenerateAudio, url, useTranscript, mainPrompt, polishEndingPrompt, hostPersonalitiesPromptPolish, hostPersonalitiesPromptOther]);
+  }, [language, ttsProvider, selectedVoice1, selectedVoice2, geminiStyle, geminiTempo, autoGenerateAudio, url, useTranscript, mainPrompt, polishEndingPrompt, hostPersonalitiesPromptPolish, hostPersonalitiesPromptOther]);
 
   // Fetch available voices on component mount
   useEffect(() => {
     const fetchVoices = async () => {
       try {
-        const response = await fetch('/api/voices');
+        const response = await fetch(`/api/voices?provider=${ttsProvider}`);
         if (response.ok) {
           const data = await response.json();
-          setAvailableVoices(data.voices || []);
+          const voices: VoiceOption[] = data.voices || [];
+          const defaults = getDefaultVoicesForProvider(ttsProvider);
+
+          setAvailableVoices(voices);
+          setSelectedVoice1((current) =>
+            voices.some((voice) => voice.id === current)
+              ? current
+              : voices.find((voice) => voice.genderBucket === 'male')?.id || voices[0]?.id || defaults.voice1
+          );
+          setSelectedVoice2((current) =>
+            voices.some((voice) => voice.id === current)
+              ? current
+              : voices.find((voice) => voice.genderBucket === 'female')?.id || voices[1]?.id || voices[0]?.id || defaults.voice2
+          );
         }
       } catch (error) {
         console.error('Failed to fetch voices:', error);
-        // Fallback to default voices if API fails
-        setAvailableVoices([
-          { id: 'FF7KdobWPaiR0vkcALHF', name: 'Ślązak' },
-          { id: 'BpjGufoPiobT79j2vtj4', name: 'Góralka' },
-        ]);
+        const fallback = DEFAULT_FALLBACK_VOICES[ttsProvider];
+        const defaults = getDefaultVoicesForProvider(ttsProvider);
+
+        setAvailableVoices(fallback);
+        setSelectedVoice1(defaults.voice1);
+        setSelectedVoice2(defaults.voice2);
       }
     };
     fetchVoices();
-  }, []);
+  }, [ttsProvider]);
 
   const voices = useMemo(() => {
-    const voice1 = availableVoices.find(v => v.id === selectedVoice1) || { id: selectedVoice1, name: 'Ślązak' };
-    const voice2 = availableVoices.find(v => v.id === selectedVoice2) || { id: selectedVoice2, name: 'Góralka' };
+    const defaults = getDefaultVoicesForProvider(ttsProvider);
+    const fallbackVoices = DEFAULT_FALLBACK_VOICES[ttsProvider];
+    const voice1 =
+      availableVoices.find((voice) => voice.id === selectedVoice1) ||
+      fallbackVoices.find((voice) => voice.id === defaults.voice1) ||
+      fallbackVoices[0];
+    const voice2 =
+      availableVoices.find((voice) => voice.id === selectedVoice2) ||
+      fallbackVoices.find((voice) => voice.id === defaults.voice2) ||
+      fallbackVoices[1] ||
+      fallbackVoices[0];
     return [voice1, voice2];
-  }, [availableVoices, selectedVoice1, selectedVoice2]);
+  }, [availableVoices, selectedVoice1, selectedVoice2, ttsProvider]);
+
+  const groupedVoices = useMemo(() => ({
+    male: availableVoices.filter((voice) => voice.genderBucket === 'male'),
+    female: availableVoices.filter((voice) => voice.genderBucket === 'female'),
+    unknown: availableVoices.filter((voice) => voice.genderBucket === 'unknown'),
+  }), [availableVoices]);
 
   const languages = useMemo(() => [
     { code: 'en', name: 'English', flag: '🇺🇸' },
@@ -427,9 +505,7 @@ export default function Home() {
     { code: 'zh', name: '中文', flag: '🇨🇳' },
   ], []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
+  const handleSubmit = async () => {
     // Check if using transcript mode
     if (useTranscript) {
       if (!transcript.trim()) {
@@ -449,6 +525,7 @@ export default function Home() {
     setHasDownloadedAudio(false);
     setConversationTurns(0);
     setCharactersUsed(null);
+    setAudioMimeType(null);
 
     try {
       let content = '';
@@ -476,7 +553,7 @@ export default function Home() {
 
         const scrapeData = await scrapeResponse.json();
         setScrapedContent(scrapeData);
-        content = editedContent || scrapeData.content;
+        content = scrapeData.content;
         title = scrapeData.title;
       }
 
@@ -494,6 +571,11 @@ export default function Home() {
           content: content,
           title: title,
           language: language,
+          tts: {
+            provider: ttsProvider,
+            geminiStyle,
+            geminiTempo,
+          },
           mainPrompt,
           polishEndingPrompt,
           hostPersonalitiesPromptPolish,
@@ -594,7 +676,11 @@ export default function Home() {
         },
         body: JSON.stringify({
           inputs: dialogueInputs,
-          apiKey: elevenlabsApiKey
+          provider: ttsProvider,
+          geminiStyle,
+          geminiTempo,
+          ...(ttsProvider === 'elevenlabs' ? { apiKey: elevenlabsApiKey } : {}),
+          ...(ttsProvider === 'gemini' ? { geminiApiKey } : {}),
         }),
       });
 
@@ -609,6 +695,16 @@ export default function Home() {
           throw new Error('Please configure your ElevenLabs API Key in Settings.');
         }
 
+        if (errorData.code === 'MISSING_GEMINI_KEY') {
+          setSettingsMessage('MISSING NEURAL MATRIX KEY: Gemini API Key required.');
+          setShowSettingsModal(true);
+          throw new Error('Please configure your Gemini API Key in Settings.');
+        }
+
+        if (errorData.code === 'GEMINI_INTERNAL_ONLY') {
+          throw new Error('Gemini TTS is currently internal-only.');
+        }
+
         throw new Error(errorData.error || 'Failed to generate audio');
       }
 
@@ -616,6 +712,7 @@ export default function Home() {
       if (audioData.charactersUsed) {
         setCharactersUsed(audioData.charactersUsed);
       }
+      setAudioMimeType(inferAudioMimeType(audioData.audioBase64, audioData.mimeType));
 
       // Revoke previous audio URL to free memory (if it was a blob URL)
       if (audioUrl) {
@@ -629,32 +726,10 @@ export default function Home() {
     } finally {
       setIsGeneratingAudio(false);
     }
-  }, [conversation, isConversationComplete, voices, audioUrl]);
+  }, [conversation, isConversationComplete, voices, audioUrl, ttsProvider, geminiStyle, geminiTempo, elevenlabsApiKey, geminiApiKey]);
 
   const getSpeakerName = (speaker: string) => {
     return speaker === 'Speaker1' ? (voices[0]?.name || 'Ślązak') : (voices[1]?.name || 'Góralka');
-  };
-
-  const handleEditContent = () => {
-    if (scrapedContent) {
-      setEditedContent(scrapedContent.content);
-      setIsEditingContent(true);
-    }
-  };
-
-  const handleSaveContent = () => {
-    if (scrapedContent) {
-      setScrapedContent({
-        ...scrapedContent,
-        content: editedContent
-      });
-      setIsEditingContent(false);
-    }
-  };
-
-  const handleCancelEdit = () => {
-    setIsEditingContent(false);
-    setEditedContent('');
   };
 
   const handleEditConversation = () => {
@@ -720,6 +795,7 @@ export default function Home() {
         setEditedConversation('');
         // Reset audio-related states since conversation changed
         setAudioUrl(null);
+        setAudioMimeType(null);
         setHasRequestedAudio(false);
         setHasDownloadedAudio(false);
       } else {
@@ -804,7 +880,7 @@ export default function Home() {
     }
     if (isLoading) return 'Starting…';
     return 'Awaiting URL';
-  }, [steps, audioUrl, isLoading, conversationTurns, isPlaying]);
+  }, [steps, audioUrl, isLoading, conversationTurns, isPlaying, charactersUsed]);
 
   const nextSteps = useMemo(() => {
     const firstPendingIdx = steps.findIndex((s) => s.status !== 'complete');
@@ -816,41 +892,10 @@ export default function Home() {
     return labels;
   }, [steps]);
 
-  // Track boundaries for animating newly streamed items
-  useEffect(() => {
-    if (conversationTurns > prevTurnsRef.current) {
-      setNewStartIndex(prevTurnsRef.current);
-      prevTurnsRef.current = conversationTurns;
-    } else if (conversationTurns < prevTurnsRef.current) {
-      prevTurnsRef.current = conversationTurns;
-      setNewStartIndex(0);
-    }
-  }, [conversationTurns]);
-
   // Logout function
   const handleLogout = async () => {
     await supabase.auth.signOut();
     window.location.reload();
-  };
-
-  // Simple SVG avatar for each speaker (gradient + initial)
-  const Avatar = ({ name, tone }: { name: string; tone: 'left' | 'right' }) => {
-    const initial = (name || '?').slice(0, 1).toUpperCase();
-    const gradId = `grad-${tone}`;
-    const g1 = tone === 'left' ? '#8b5cf6' : '#06b6d4';
-    const g2 = tone === 'left' ? '#ec4899' : '#22c55e';
-    return (
-      <svg viewBox="0 0 40 40" className="h-10 w-10 lg:h-12 lg:w-12 rounded-full shadow-md">
-        <defs>
-          <linearGradient id={gradId} x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor={g1} />
-            <stop offset="100%" stopColor={g2} />
-          </linearGradient>
-        </defs>
-        <circle cx="20" cy="20" r="19" fill={`url(#${gradId})`} opacity="0.9" />
-        <text x="50%" y="54%" textAnchor="middle" fontSize="22" fontWeight="700" fill="white" fontFamily="system-ui, -apple-system, Segoe UI, Roboto">{initial}</text>
-      </svg>
-    );
   };
 
   // Audio controls logic
@@ -865,37 +910,6 @@ export default function Home() {
     try { el.load(); } catch { }
   }, [audioUrl]);
 
-  const togglePlay = async () => {
-    const el = audioRef.current;
-    if (!el) return;
-    if (!audioUrl) return;
-    try {
-      if (el.paused) {
-        await el.play();
-        setIsPlaying(true);
-      } else {
-        el.pause();
-        setIsPlaying(false);
-      }
-    } catch (e) {
-      console.error('Audio play/pause error', e);
-    }
-  };
-
-  const restartAudio = () => {
-    const el = audioRef.current;
-    if (!el) return;
-    if (!audioUrl) return;
-    try {
-      el.currentTime = 0;
-      if (!el.paused) {
-        el.play();
-      }
-    } catch (e) {
-      console.error('Audio restart error', e);
-    }
-  };
-
   const downloadAudio = () => {
     if (!audioUrl) return;
 
@@ -908,13 +922,15 @@ export default function Home() {
         byteNumbers[i] = byteCharacters.charCodeAt(i);
       }
       const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: 'audio/mpeg' });
+      const mimeType = inferAudioMimeType(audioUrl, audioMimeType);
+      const extension = getAudioExtension(mimeType);
+      const blob = new Blob([byteArray], { type: mimeType });
 
       // Create download link
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `podcast-${Date.now()}.mp3`;
+      link.download = `podcast-${Date.now()}.${extension}`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -932,7 +948,9 @@ export default function Home() {
     try {
       const title = scrapedContent?.title || customTitle || 'Untitled Podcast';
       const timestamp = Date.now();
-      const filename = `${title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}_${timestamp}.mp3`;
+      const mimeType = inferAudioMimeType(audioUrl, audioMimeType);
+      const extension = getAudioExtension(mimeType);
+      const filename = `${title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}_${timestamp}.${extension}`;
 
       // Calculate approximate size (base64 is ~33% larger than binary)
       const base64Data = audioUrl.includes(',') ? audioUrl.split(',')[1] : audioUrl;
@@ -945,6 +963,7 @@ export default function Home() {
         filename,
         createdAt: new Date().toISOString(),
         size: sizeBytes,
+        mimeType,
         conversation,
         // Don't store full audio in localStorage (too large), just metadata
         audioBase64: undefined,
@@ -1140,7 +1159,6 @@ export default function Home() {
             <div style={{ marginTop: '20px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '20px' }}>
               <div className="section-header" style={{ border: 'none', padding: 0, marginBottom: '10px' }}>
                 <h3 className="monolith-title" style={{ fontSize: '11px' }}>Scraped Content</h3>
-                <button onClick={handleEditContent} className="monolith-btn small primary">Edit</button>
               </div>
               <div style={{ fontSize: '10px', color: '#666', maxHeight: '100px', overflowY: 'auto', background: 'rgba(0,0,0,0.2)', padding: '10px', borderRadius: '8px' }}>
                 {scrapedContent.title && <strong style={{ color: '#fff', display: 'block', marginBottom: '4px' }}>{scrapedContent.title}</strong>}
@@ -1152,7 +1170,7 @@ export default function Home() {
           {/* Generate Action */}
           <div style={{ marginTop: 'auto', paddingTop: '16px' }}>
             <button
-              onClick={(e) => handleSubmit(e as any)}
+              onClick={() => { void handleSubmit(); }}
               disabled={isLoading || (!useTranscript && !url.trim()) || (useTranscript && !transcript.trim())}
               className="monolith-btn primary"
               style={{ width: '100%' }}
@@ -1267,7 +1285,7 @@ export default function Home() {
                     controls
                     style={{ width: '100%', marginBottom: '10px' }}
                   />
-                  <button onClick={downloadAudio} className="monolith-btn small" style={{ width: '100%' }}>Download MP3</button>
+                  <button onClick={downloadAudio} className="monolith-btn small" style={{ width: '100%' }}>Download Audio</button>
                 </div>
               ) : (
                 <div style={{ color: '#444', fontSize: '13px' }}>No audio yet.</div>
@@ -1282,6 +1300,51 @@ export default function Home() {
             </div>
 
             <div style={{ marginBottom: '15px' }}>
+              <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Provider:</label>
+              <select
+                className="monolith-select"
+                value={ttsProvider}
+                onChange={(e) => setTtsProvider(e.target.value as TtsProvider)}
+                suppressHydrationWarning
+              >
+                <option value="elevenlabs">ElevenLabs</option>
+                {canUseGemini && <option value="gemini">Gemini TTS</option>}
+              </select>
+              <div style={{ fontSize: '10px', color: '#666', marginTop: '6px', lineHeight: '1.5' }}>
+                {ttsProvider === 'gemini'
+                  ? 'Gemini gender groups are curated locally for UI grouping.'
+                  : 'ElevenLabs gender groups use provider metadata when available.'}
+              </div>
+            </div>
+
+            {ttsProvider === 'gemini' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '15px' }}>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Gemini Style:</label>
+                  <select
+                    className="monolith-select"
+                    value={geminiStyle}
+                    onChange={(e) => setGeminiStyle(e.target.value as 'plain' | 'expressive-lite')}
+                  >
+                    <option value="expressive-lite">Expressive Lite</option>
+                    <option value="plain">Plain</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Gemini Tempo:</label>
+                  <select
+                    className="monolith-select"
+                    value={geminiTempo}
+                    onChange={(e) => setGeminiTempo(e.target.value as 'normal' | 'fast')}
+                  >
+                    <option value="normal">Normal</option>
+                    <option value="fast">Fast</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginBottom: '15px' }}>
               <label style={{ fontSize: '11px', fontWeight: 600, color: '#666', marginBottom: '6px', display: 'block' }}>Ślązak:</label>
               <select
                 className="monolith-select"
@@ -1289,7 +1352,33 @@ export default function Home() {
                 onChange={(e) => setSelectedVoice1(e.target.value)}
                 suppressHydrationWarning
               >
-                {availableVoices.filter(v => v.id).map((v, idx) => <option key={`voice1-${v.id || idx}`} value={v.id}>{v.name} {v.category ? `(${v.category})` : ''}</option>)}
+                {groupedVoices.male.length > 0 && (
+                  <optgroup label="Męskie">
+                    {groupedVoices.male.map((voice) => (
+                      <option key={`voice1-male-${voice.id}`} value={voice.id}>
+                        {voice.name} {voice.style ? `(${voice.style})` : voice.category ? `(${voice.category})` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {groupedVoices.female.length > 0 && (
+                  <optgroup label="Żeńskie">
+                    {groupedVoices.female.map((voice) => (
+                      <option key={`voice1-female-${voice.id}`} value={voice.id}>
+                        {voice.name} {voice.style ? `(${voice.style})` : voice.category ? `(${voice.category})` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {groupedVoices.unknown.length > 0 && (
+                  <optgroup label="Inne / nieokreślone">
+                    {groupedVoices.unknown.map((voice) => (
+                      <option key={`voice1-unknown-${voice.id}`} value={voice.id}>
+                        {voice.name} {voice.style ? `(${voice.style})` : voice.category ? `(${voice.category})` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
 
@@ -1301,7 +1390,33 @@ export default function Home() {
                 onChange={(e) => setSelectedVoice2(e.target.value)}
                 suppressHydrationWarning
               >
-                {availableVoices.filter(v => v.id).map((v, idx) => <option key={`voice2-${v.id || idx}`} value={v.id}>{v.name} {v.category ? `(${v.category})` : ''}</option>)}
+                {groupedVoices.female.length > 0 && (
+                  <optgroup label="Żeńskie">
+                    {groupedVoices.female.map((voice) => (
+                      <option key={`voice2-female-${voice.id}`} value={voice.id}>
+                        {voice.name} {voice.style ? `(${voice.style})` : voice.category ? `(${voice.category})` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {groupedVoices.male.length > 0 && (
+                  <optgroup label="Męskie">
+                    {groupedVoices.male.map((voice) => (
+                      <option key={`voice2-male-${voice.id}`} value={voice.id}>
+                        {voice.name} {voice.style ? `(${voice.style})` : voice.category ? `(${voice.category})` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {groupedVoices.unknown.length > 0 && (
+                  <optgroup label="Inne / nieokreślone">
+                    {groupedVoices.unknown.map((voice) => (
+                      <option key={`voice2-unknown-${voice.id}`} value={voice.id}>
+                        {voice.name} {voice.style ? `(${voice.style})` : voice.category ? `(${voice.category})` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
           </div>
@@ -1545,15 +1660,17 @@ export default function Home() {
         initialSettings={{
           openai_api_key: openaiApiKey,
           elevenlabs_api_key: elevenlabsApiKey,
+          gemini_api_key: geminiApiKey,
           main_prompt: mainPrompt,
           polish_ending_prompt: polishEndingPrompt,
           host_prompt_polish: hostPersonalitiesPromptPolish,
           host_prompt_other: hostPersonalitiesPromptOther,
         }}
         onSave={(newSettings) => {
-          setUserSettings(newSettings);
-          if (newSettings.openai_api_key) setOpenaiApiKey(newSettings.openai_api_key);
-          if (newSettings.elevenlabs_api_key) setElevenlabsApiKey(newSettings.elevenlabs_api_key);
+          setUserSettings(newSettings as Record<string, unknown>);
+          setOpenaiApiKey(newSettings.openai_api_key);
+          setElevenlabsApiKey(newSettings.elevenlabs_api_key);
+          setGeminiApiKey(newSettings.gemini_api_key);
           if (newSettings.main_prompt) setMainPrompt(newSettings.main_prompt);
           if (newSettings.polish_ending_prompt) setPolishEndingPrompt(newSettings.polish_ending_prompt);
           if (newSettings.host_prompt_polish) setHostPersonalitiesPromptPolish(newSettings.host_prompt_polish);
@@ -1565,5 +1682,3 @@ export default function Home() {
     </div>
   );
 }
-
-function pointerButtons(c: any): 'pointer' | 'default' { return c ? 'pointer' : 'default'; }

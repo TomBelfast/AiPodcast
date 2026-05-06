@@ -1,6 +1,9 @@
 import path from 'path';
 import { promises as fs } from 'fs';
+import ffmpeg from 'fluent-ffmpeg';
 import { createDialogue } from '@/actions/dialogue';
+import { createGeminiDialogue } from '@/actions/gemini-tts';
+import { getEffectiveAdminSettings } from '@/lib/admin-settings';
 import {
   ensurePodcastVideoArchiveDir,
   fileExists,
@@ -15,10 +18,11 @@ import {
   setPodcastVideoJobStage,
   updatePodcastVideoJob,
 } from '@/lib/podcast-video/jobs';
-import { buildExactSrt, hasWordTimings } from '@/lib/podcast-video/exact-captions';
+import { buildExactSrt, formatSrtTime, hasWordTimings } from '@/lib/podcast-video/exact-captions';
 import { renderPodcastVideoLocally } from '@/lib/podcast-video/local-renderer';
 import { uploadBufferToMinio, uploadFileToMinio } from '@/lib/podcast-video/minio';
 import { composePodcastVideo, renderPodcastCaptions } from '@/lib/podcast-video/nca';
+import { DEFAULT_GEMINI_VOICES } from '@/lib/voice-catalog';
 import {
   DEFAULT_PODCAST_VIDEO_VOICES,
   type PodcastConversationItem,
@@ -26,6 +30,13 @@ import {
   type PodcastVideoJobRequest,
   type PodcastVideoRenderMode,
 } from '@/lib/podcast-video/types';
+import {
+  normalizeGeminiStyle,
+  normalizeGeminiTempo,
+  type GeminiStyle,
+  type GeminiTempo,
+  type TtsProvider,
+} from '@/lib/podcast/contracts';
 import {
   generateStems,
   generateIndividualSegments,
@@ -35,6 +46,41 @@ import {
   parseElevenLabsTranscript,
 } from '@/lib/transcript-parser';
 import { getPodcastVideoCoverPath } from '@/lib/podcast-video/cover';
+import { generateConversationDraft } from '@/lib/podcast/generate';
+
+type PipelineVoiceSegment = {
+  voice_id?: string | null;
+  voiceId?: string | null;
+  dialogue_input_index?: number | null;
+  dialogueInputIndex?: number | null;
+  start_time_seconds?: number | null;
+  startTimeSeconds?: number | null;
+  end_time_seconds?: number | null;
+  endTimeSeconds?: number | null;
+  character_start_index?: number | null;
+  characterStartIndex?: number | null;
+  character_end_index?: number | null;
+  characterEndIndex?: number | null;
+  speaker?: string | null;
+};
+
+type NormalizedVoiceSegment = {
+  voiceId: string | null;
+  dialogueInputIndex: number;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  characterStartIndex: number;
+  characterEndIndex: number;
+  speaker: string;
+};
+
+type PipelineAlignment = {
+  characters?: string[];
+  character_start_times_seconds?: number[];
+  characterStartTimesSeconds?: number[];
+  character_end_times_seconds?: number[];
+  characterEndTimesSeconds?: number[];
+} | null;
 
 const CAPTION_NOISE_WORDS = new Set([
   'sigh',
@@ -184,6 +230,326 @@ function dataUrlToBuffer(dataUrl: string): Buffer {
   return Buffer.from(base64, 'base64');
 }
 
+function roundSeconds(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function resolveRequestedTtsProvider(request: PodcastVideoJobRequest): TtsProvider {
+  const normalized = String(request.tts?.provider || 'elevenlabs').trim().toLowerCase();
+  if (normalized === 'gemini') {
+    return 'gemini';
+  }
+  if (normalized === 'omnivoice') {
+    return 'omnivoice';
+  }
+  return 'elevenlabs';
+}
+
+async function probeMediaDurationSeconds(filePath: string): Promise<number> {
+  const { spawn } = await import('child_process');
+
+  return new Promise<number>((resolve, reject) => {
+    const proc = spawn('ffprobe', [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=noprint_wrappers=1:nokey=1',
+      filePath,
+    ]);
+
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffprobe exit ${code}: ${stderr.slice(-300)}`));
+        return;
+      }
+      const duration = Number(String(stdout).trim());
+      if (!Number.isFinite(duration)) {
+        reject(new Error(`ffprobe invalid duration: "${stdout}"`));
+        return;
+      }
+      resolve(duration);
+    });
+  });
+}
+
+async function transcodeAudioFileToMp3(inputPath: string, outputPath: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .audioCodec('libmp3lame')
+      .format('mp3')
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (error) => reject(error))
+      .run();
+  });
+}
+
+async function concatAudioFilesToMp3(inputPaths: string[], outputPath: string): Promise<void> {
+  if (inputPaths.length === 0) {
+    throw new Error('Cannot concatenate an empty audio segment list.');
+  }
+
+  if (inputPaths.length === 1) {
+    await fs.copyFile(inputPaths[0], outputPath);
+    return;
+  }
+
+  const { spawn } = await import('child_process');
+  const inputArgs = inputPaths.flatMap((inputPath) => ['-i', inputPath]);
+  const concatInputs = inputPaths.map((_, index) => `[${index}:a]`).join('');
+  const args = [
+    '-y',
+    ...inputArgs,
+    '-filter_complex',
+    `${concatInputs}concat=n=${inputPaths.length}:v=0:a=1[outa]`,
+    '-map',
+    '[outa]',
+    '-c:a',
+    'libmp3lame',
+    '-q:a',
+    '2',
+    outputPath,
+  ];
+
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn('ffmpeg', args);
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`ffmpeg concat exit ${code}: ${stderr.slice(-600)}`));
+    });
+  });
+}
+
+async function synthesizeGeminiAudioBySegment(args: {
+  jobId: string;
+  jobDir: string;
+  conversation: PodcastConversationItem[];
+  dialogueInputs: Array<{ text: string; voiceId: string }>;
+  apiKey: string;
+  modelId?: string;
+  geminiStyle: GeminiStyle;
+  geminiTempo: GeminiTempo;
+  speakerVoiceMap: Map<string, string>;
+  outputAudioPath: string;
+}): Promise<{
+  audioBuffer: Buffer;
+  voiceSegments: NormalizedVoiceSegment[];
+}> {
+  const sourceDir = path.join(args.jobDir, 'gemini-source-segments');
+  const mp3Dir = path.join(args.jobDir, 'gemini-mp3-segments');
+  await fs.mkdir(sourceDir, { recursive: true });
+  await fs.mkdir(mp3Dir, { recursive: true });
+
+  let cursor = 0;
+  const segmentMp3Paths: string[] = [];
+  const voiceSegments: NormalizedVoiceSegment[] = [];
+
+  for (let index = 0; index < args.dialogueInputs.length; index += 1) {
+    const input = args.dialogueInputs[index];
+    const conversationItem = args.conversation[index];
+    const geminiResult = await createGeminiDialogue({
+      inputs: [input],
+      apiKey: args.apiKey,
+      modelId: args.modelId,
+      geminiStyle: args.geminiStyle,
+      geminiTempo: args.geminiTempo,
+    });
+
+    if (!geminiResult.ok) {
+      throw new Error(geminiResult.error);
+    }
+
+    if (!geminiResult.value.audioBase64) {
+      throw new Error(`Gemini TTS did not return audio data for segment ${index + 1}.`);
+    }
+
+    const paddedIndex = String(index + 1).padStart(4, '0');
+    const wavPath = path.join(sourceDir, `${paddedIndex}.wav`);
+    const mp3Path = path.join(mp3Dir, `${paddedIndex}.mp3`);
+    await writeBufferFile(wavPath, dataUrlToBuffer(geminiResult.value.audioBase64));
+    await transcodeAudioFileToMp3(wavPath, mp3Path);
+
+    const duration = await probeMediaDurationSeconds(mp3Path);
+    const startTimeSeconds = cursor;
+    const endTimeSeconds = cursor + duration;
+    cursor = endTimeSeconds;
+    segmentMp3Paths.push(mp3Path);
+
+    voiceSegments.push({
+      voiceId: input.voiceId || args.speakerVoiceMap.get('speaker1') || null,
+      dialogueInputIndex: index,
+      startTimeSeconds,
+      endTimeSeconds,
+      characterStartIndex: 0,
+      characterEndIndex: conversationItem?.text.length || 0,
+      speaker: conversationItem?.speaker || `Speaker${index % 2 === 0 ? 1 : 2}`,
+    });
+
+    await setPodcastVideoJobStage(
+      args.jobId,
+      'generating-audio',
+      40,
+      `Tworze audio z Gemini direct ${index + 1}/${args.dialogueInputs.length}.`
+    );
+  }
+
+  await concatAudioFilesToMp3(segmentMp3Paths, args.outputAudioPath);
+  const finalDuration = await probeMediaDurationSeconds(args.outputAudioPath);
+  const lastSegment = voiceSegments.at(-1);
+  if (lastSegment) {
+    lastSegment.endTimeSeconds = finalDuration;
+  }
+
+  return {
+    audioBuffer: await fs.readFile(args.outputAudioPath),
+    voiceSegments,
+  };
+}
+
+function buildEstimatedWordsFromSegments(
+  segments: NormalizedTranscript['segments']
+): NormalizedTranscript['words'] {
+  const words: NormalizedTranscript['words'] = [];
+  let wordId = 0;
+
+  for (const segment of segments) {
+    const rawTokens = segment.text.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    if (rawTokens.length === 0) {
+      continue;
+    }
+
+    const segmentStart = segment.start_time;
+    const segmentEnd = Math.max(segmentStart, segment.end_time);
+    const totalDuration = Math.max(0.12, segmentEnd - segmentStart);
+    const weights = rawTokens.map((token) =>
+      Math.max(1, normalizeCaptionToken(token).length || token.length)
+    );
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || rawTokens.length;
+    let cursor = segmentStart;
+
+    for (let index = 0; index < rawTokens.length; index += 1) {
+      const isLast = index === rawTokens.length - 1;
+      const sliceDuration = isLast
+        ? Math.max(0.04, segmentEnd - cursor)
+        : Math.max(0.04, (totalDuration * weights[index]) / totalWeight);
+      const startTime = cursor;
+      const endTime = isLast ? segmentEnd : Math.min(segmentEnd, cursor + sliceDuration);
+      cursor = endTime;
+
+      words.push({
+        id: wordId,
+        segment_id: segment.id,
+        speaker: segment.speaker,
+        voice_id: segment.voice_id,
+        text: rawTokens[index],
+        start_time: roundSeconds(startTime),
+        end_time: roundSeconds(Math.max(startTime, endTime)),
+      });
+      wordId += 1;
+    }
+  }
+
+  return words;
+}
+
+function normalizeVoiceSegmentsForTranscript(
+  voiceSegments: PipelineVoiceSegment[],
+  conversation: PodcastConversationItem[]
+): NormalizedVoiceSegment[] {
+  return voiceSegments.map((segment, index) => {
+    const dialogueInputIndex = Number(
+      segment.dialogue_input_index ?? segment.dialogueInputIndex ?? index
+    );
+    const conversationItem = conversation[dialogueInputIndex];
+    return {
+      voiceId: segment.voice_id ?? segment.voiceId ?? null,
+      dialogueInputIndex,
+      startTimeSeconds: Number(segment.start_time_seconds ?? segment.startTimeSeconds ?? 0),
+      endTimeSeconds: Number(segment.end_time_seconds ?? segment.endTimeSeconds ?? 0),
+      characterStartIndex: Number(
+        segment.character_start_index ?? segment.characterStartIndex ?? 0
+      ),
+      characterEndIndex: Number(
+        segment.character_end_index ??
+          segment.characterEndIndex ??
+          conversationItem?.text.length ??
+          0
+      ),
+      speaker: String(
+        segment.speaker || conversationItem?.speaker || `Speaker${index % 2 === 0 ? 1 : 2}`
+      ),
+    };
+  });
+}
+
+function buildEstimatedTranscript(args: {
+  source: TtsProvider;
+  jobId: string;
+  title: string;
+  audioFilename: string;
+  conversation: PodcastConversationItem[];
+  voiceSegments: NormalizedVoiceSegment[];
+  speakerVoiceMap: Map<string, string>;
+}): NormalizedTranscript {
+  const speakers = buildSpeakersMetadata(args.conversation, args.speakerVoiceMap);
+  const segments = args.voiceSegments.map((segment, index) => ({
+    id: index,
+    speaker: segment.speaker || null,
+    voice_id: segment.voiceId,
+    dialogue_input_index: segment.dialogueInputIndex,
+    start_time: roundSeconds(segment.startTimeSeconds),
+    end_time: roundSeconds(segment.endTimeSeconds),
+    text: args.conversation[segment.dialogueInputIndex]?.text || '',
+  }));
+  const words = buildEstimatedWordsFromSegments(segments);
+  const srt = segments
+    .map((segment, index) =>
+      `${index + 1}\n${formatSrtTime(segment.start_time)} --> ${formatSrtTime(segment.end_time)}\n${segment.text.toLocaleUpperCase('pl-PL')}\n`
+    )
+    .join('\n');
+
+  return {
+    source: args.source,
+    version: 1,
+    job_id: args.jobId,
+    title: args.title,
+    audio_filename: args.audioFilename,
+    timestamp: new Date().toISOString(),
+    duration_seconds: segments.at(-1)?.end_time || 0,
+    full_text: args.conversation.map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim(),
+    speakers: Object.entries(speakers).map(([id, data]) => ({
+      id,
+      name: data.name,
+      voice_id: data.voiceId,
+      gender: data.gender,
+      personality: data.personality,
+    })),
+    segments,
+    words,
+    srt,
+    warnings: words.length > 0 ? ['estimated_word_timing'] : ['estimated_segment_timing'],
+  };
+}
+
 function getInternalAppBaseUrl(): string {
   return (process.env.INTERNAL_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'http://127.0.0.1:3300')
     .trim()
@@ -279,9 +645,9 @@ function buildRawMetadata(args: {
   title: string;
   audioFilename: string;
   conversation: PodcastConversationItem[];
-  voiceSegments: any[] | undefined;
-  alignment: any;
-  normalizedAlignment: any;
+  voiceSegments: PipelineVoiceSegment[] | undefined;
+  alignment: PipelineAlignment;
+  normalizedAlignment: PipelineAlignment;
   speakerVoiceMap: Map<string, string>;
 }) {
   const reverseSpeakerMap = new Map<string, string>();
@@ -298,8 +664,8 @@ function buildRawMetadata(args: {
     title: args.title,
     speakers: buildSpeakersMetadata(args.conversation, args.speakerVoiceMap),
     conversation: args.conversation,
-    voiceSegments: (args.voiceSegments || []).map((segment: any) => {
-      const voiceId = segment.voice_id || segment.voiceId;
+    voiceSegments: (args.voiceSegments || []).map((segment) => {
+      const voiceId = segment.voice_id || segment.voiceId || null;
       return {
         voiceId,
         dialogueInputIndex: segment.dialogue_input_index ?? segment.dialogueInputIndex,
@@ -307,7 +673,7 @@ function buildRawMetadata(args: {
         endTimeSeconds: segment.end_time_seconds ?? segment.endTimeSeconds,
         characterStartIndex: segment.character_start_index ?? segment.characterStartIndex,
         characterEndIndex: segment.character_end_index ?? segment.characterEndIndex,
-        speaker: reverseSpeakerMap.get(voiceId) || 'Speaker1',
+        speaker: voiceId ? reverseSpeakerMap.get(voiceId) || 'Speaker1' : 'Speaker1',
       };
     }),
     alignment: args.alignment ? {
@@ -325,79 +691,25 @@ function buildRawMetadata(args: {
   };
 }
 
-async function parseConversationStream(response: Response): Promise<PodcastConversationItem[]> {
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new Error('Generator conversation stream is unavailable.');
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let finalConversation: PodcastConversationItem[] = [];
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-
-      const parsed = JSON.parse(trimmed);
-      if (parsed.type === 'error') {
-        throw new Error(parsed.error || 'Conversation generation failed.');
-      }
-      if (parsed.type === 'complete') {
-        finalConversation = normalizeConversation(parsed.data?.conversation || []);
-      }
-    }
-  }
-
-  if (buffer.trim()) {
-    const parsed = JSON.parse(buffer.trim());
-    if (parsed.type === 'error') {
-      throw new Error(parsed.error || 'Conversation generation failed.');
-    }
-    if (parsed.type === 'complete') {
-      finalConversation = normalizeConversation(parsed.data?.conversation || []);
-    }
-  }
-
-  return finalConversation;
-}
-
 async function generateConversationFromScript(
   scriptText: string,
   title: string,
-  language: string
+  language: string,
+  ttsProvider: TtsProvider,
+  geminiStyle?: GeminiStyle,
+  geminiTempo?: GeminiTempo
 ): Promise<PodcastConversationItem[]> {
-  const response = await fetch(`${getInternalAppBaseUrl()}/api/generate-podcast`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      content: scriptText,
-      title,
-      language,
-    }),
-    signal: AbortSignal.timeout(5 * 60 * 1000),
+  return generateConversationDraft({
+    rawText: scriptText,
+    title,
+    language,
+    ttsProvider,
+    geminiStyle,
+    geminiTempo,
+    internalAppBaseUrl: getInternalAppBaseUrl(),
+    timeoutMs: 8 * 60 * 1000,
+    llmAttemptTimeoutMs: 150 * 1000,
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Conversation generation failed: ${errorText.slice(0, 500)}`);
-  }
-
-  return parseConversationStream(response);
 }
 
 function ensureTranscriptCompleteness(
@@ -545,7 +857,7 @@ async function completeWithLocalRenderer(args: {
     'rendering-captions',
     88,
     localMode === 'highlight_exact'
-      ? 'Lokalny renderer wypala highlight 1:1 na podstawie word timings z ElevenLabs.'
+      ? 'Lokalny renderer wypala highlight na podstawie word timings z transcriptu.'
       : 'Lokalny renderer wypala classic 1:1 z oryginalnego tekstu bez auto-transkrypcji.'
   );
 
@@ -567,7 +879,7 @@ async function completeWithLocalRenderer(args: {
     fallbackReason: args.fallbackReason || null,
     message:
       localMode === 'highlight_exact'
-        ? 'Finalne MP4 jest gotowe. Uzyto lokalnego renderera highlight 1:1 z tekstem i timingami ElevenLabs.'
+        ? 'Finalne MP4 jest gotowe. Uzyto lokalnego renderera highlight z tekstem i timingami slow.'
         : 'Finalne MP4 jest gotowe. Uzyto lokalnego renderera classic 1:1, bo transcript nie zawieral timings slowo po slowie.',
     error: null,
   });
@@ -600,11 +912,16 @@ export async function runPodcastVideoJob(
       throw new Error(`Podcast cover image was not found: ${coverPath}`);
     }
 
+    const requestedTtsProvider = resolveRequestedTtsProvider(request);
+    const geminiStyle = normalizeGeminiStyle(request.tts?.geminiStyle);
+    const geminiTempo = normalizeGeminiTempo(request.tts?.geminiTempo);
     let conversation = buildJobConversation(request);
     if (!conversation.length) {
-      const scriptText = request.script_text?.replace(/\s+/g, ' ').trim();
+      const scriptText =
+        request.raw_text?.replace(/\s+/g, ' ').trim() ||
+        request.script_text?.replace(/\s+/g, ' ').trim();
       if (!scriptText) {
-        throw new Error('Request must include script_text, conversation, or transcript.');
+        throw new Error('Request must include raw_text, conversation, or transcript.');
       }
 
       await setPodcastVideoJobStage(
@@ -613,7 +930,14 @@ export async function runPodcastVideoJob(
         22,
         'Generuje conversation z wejscowego tekstu.'
       );
-      conversation = await generateConversationFromScript(scriptText, title, language);
+      conversation = await generateConversationFromScript(
+        scriptText,
+        title,
+        language,
+        requestedTtsProvider,
+        geminiStyle,
+        geminiTempo
+      );
     }
 
     if (!conversation.length) {
@@ -622,7 +946,7 @@ export async function runPodcastVideoJob(
 
     await updatePodcastVideoJob(jobId, {
       inputSummary: {
-        hasScriptText: Boolean(request.script_text?.trim()),
+        hasScriptText: Boolean(request.raw_text?.trim() || request.script_text?.trim()),
         hasConversation: Array.isArray(request.conversation) && request.conversation.length > 0,
         hasTranscript: Boolean(request.transcript),
         conversationCount: conversation.length,
@@ -633,11 +957,29 @@ export async function runPodcastVideoJob(
       jobId,
       'generating-audio',
       40,
-      'Tworze MP3 i alignment z ElevenLabs.'
+      requestedTtsProvider === 'gemini'
+        ? 'Tworze audio z Gemini direct.'
+        : requestedTtsProvider === 'omnivoice'
+          ? 'Tworze audio z OmniVoice.'
+          : 'Tworze MP3 i alignment z ElevenLabs.'
     );
 
-    const voice1 = request.voice1?.trim() || DEFAULT_PODCAST_VIDEO_VOICES.voice1;
-    const voice2 = request.voice2?.trim() || DEFAULT_PODCAST_VIDEO_VOICES.voice2;
+    const defaultVoice1 =
+      requestedTtsProvider === 'gemini'
+        ? DEFAULT_GEMINI_VOICES.voice1
+        : DEFAULT_PODCAST_VIDEO_VOICES.voice1;
+    const defaultVoice2 =
+      requestedTtsProvider === 'gemini'
+        ? DEFAULT_GEMINI_VOICES.voice2
+        : DEFAULT_PODCAST_VIDEO_VOICES.voice2;
+    const voice1 =
+      request.tts?.voice1?.trim() ||
+      request.voice1?.trim() ||
+      defaultVoice1;
+    const voice2 =
+      request.tts?.voice2?.trim() ||
+      request.voice2?.trim() ||
+      defaultVoice2;
     const speakerVoiceMap = buildSpeakerVoiceMap(conversation, voice1, voice2);
 
     const dialogueInputs = conversation.map((item) => ({
@@ -645,28 +987,72 @@ export async function runPodcastVideoJob(
       voiceId: speakerVoiceMap.get(normalizeSpeakerKey(item.speaker)) || voice2,
     }));
 
-    const dialogueResult = await createDialogue({
-      inputs: dialogueInputs,
-      includeTimestamps: true,
-    });
+    const paths = await ensurePodcastVideoArchiveDir(jobId);
+    const adminSettings = getEffectiveAdminSettings();
+    let audioBuffer: Buffer;
+    let voiceSegments: PipelineVoiceSegment[] = [];
+    let alignment: PipelineAlignment = null;
+    let normalizedAlignment: PipelineAlignment = null;
 
-    if (!dialogueResult.ok) {
-      throw new Error(dialogueResult.error);
+    if (requestedTtsProvider === 'omnivoice') {
+      throw new Error(
+        'tts.provider "omnivoice" is not supported in /api/podcast-video/jobs. Use /api/podcast-video/podcast-film/jobs instead.'
+      );
     }
 
-    const paths = await ensurePodcastVideoArchiveDir(jobId);
-    const audioBuffer = dataUrlToBuffer(dialogueResult.value.audioBase64);
-    await writeBufferFile(paths.audio, audioBuffer);
+    if (requestedTtsProvider === 'gemini') {
+      const geminiApiKey =
+        request.tts?.apiKey?.trim() ||
+        String(adminSettings.gemini_api_key || '').trim();
+
+      if (!geminiApiKey) {
+        throw new Error('Gemini API key is missing.');
+      }
+
+      const geminiAudio = await synthesizeGeminiAudioBySegment({
+        jobId,
+        jobDir: paths.dir,
+        conversation,
+        dialogueInputs,
+        apiKey: geminiApiKey,
+        modelId: request.tts?.model || undefined,
+        geminiStyle,
+        geminiTempo,
+        speakerVoiceMap,
+        outputAudioPath: paths.audio,
+      });
+      audioBuffer = geminiAudio.audioBuffer;
+      voiceSegments = geminiAudio.voiceSegments;
+    } else {
+      const dialogueResult = await createDialogue({
+        inputs: dialogueInputs,
+        includeTimestamps: true,
+        apiKey: request.tts?.apiKey || undefined,
+        modelId: request.tts?.model || undefined,
+      });
+
+      if (!dialogueResult.ok) {
+        throw new Error(dialogueResult.error);
+      }
+
+      audioBuffer = dataUrlToBuffer(dialogueResult.value.audioBase64);
+      await writeBufferFile(paths.audio, audioBuffer);
+      voiceSegments = dialogueResult.value.voiceSegments || [];
+      alignment = dialogueResult.value.alignment || null;
+      normalizedAlignment = dialogueResult.value.normalizedAlignment || null;
+    }
     
     await setPodcastVideoJobStage(
       jobId,
       'generating-audio-stems',
       45,
-      'Generuje osobne sciezki audio (stems) na podstawie znacznikow czasu.'
+      requestedTtsProvider === 'elevenlabs'
+        ? 'Generuje osobne sciezki audio (stems) na podstawie znacznikow czasu.'
+        : 'Generuje stems i segmenty na podstawie szacowanych timingow segmentow.'
     );
     await generateStems(
       paths.audio,
-      dialogueResult.value.voiceSegments || [],
+      voiceSegments,
       conversation,
       speakerVoiceMap,
       paths.stem1,
@@ -675,7 +1061,7 @@ export async function runPodcastVideoJob(
 
     const segmentFiles = await generateIndividualSegments(
       paths.audio,
-      dialogueResult.value.voiceSegments || [],
+      voiceSegments,
       conversation,
       speakerVoiceMap,
       paths.segmentsDir
@@ -707,18 +1093,28 @@ export async function runPodcastVideoJob(
           path.basename(paths.audio)
         )
       : finalizeTranscript(
-          parseElevenLabsTranscript(
-            buildRawMetadata({
-              jobId,
-              title,
-              audioFilename: path.basename(paths.audio),
-              conversation,
-              voiceSegments: dialogueResult.value.voiceSegments,
-              alignment: dialogueResult.value.alignment,
-              normalizedAlignment: dialogueResult.value.normalizedAlignment,
-              speakerVoiceMap,
-            })
-          ),
+          requestedTtsProvider === 'elevenlabs'
+            ? parseElevenLabsTranscript(
+                buildRawMetadata({
+                  jobId,
+                  title,
+                  audioFilename: path.basename(paths.audio),
+                  conversation,
+                  voiceSegments,
+                  alignment,
+                  normalizedAlignment,
+                  speakerVoiceMap,
+                })
+              )
+            : buildEstimatedTranscript({
+                source: requestedTtsProvider,
+                jobId,
+                title,
+                audioFilename: path.basename(paths.audio),
+                conversation,
+                voiceSegments: normalizeVoiceSegmentsForTranscript(voiceSegments, conversation),
+                speakerVoiceMap,
+              }),
           title,
           path.basename(paths.audio)
         );

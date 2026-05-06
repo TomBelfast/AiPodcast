@@ -14,7 +14,7 @@ const OUTPUT_AUDIO_BITRATE = '192k';
 const FONT_FAMILY = 'DejaVu Sans';
 const SAFE_MARGIN_X = 140;
 const DEFAULT_MARGIN_V = 680;
-const HIGHLIGHT_VISIBLE_WORDS = 2;
+const HIGHLIGHT_VISIBLE_WORDS = 1;
 const EDGE_PUNCTUATION_PATTERN =
   /^[.,!?;:()[\]{}"„”'«»]+|[.,!?;:()[\]{}"„”'«»]+$/g;
 

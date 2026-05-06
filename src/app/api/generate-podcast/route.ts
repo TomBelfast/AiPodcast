@@ -1,25 +1,233 @@
 import { NextRequest, NextResponse } from "next/server";
-import { streamObject } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
+import { generateObject } from "ai";
+import { createOpenAI, type OpenAIProviderSettings } from "@ai-sdk/openai";
 import { z } from "zod";
+import {
+  collectCandidateObjects,
+  findNestedObject,
+  isPlainObject,
+  normalizeConversationDraft,
+  normalizeGeminiStyle,
+  normalizeGeminiTempo,
+  normalizeTtsProvider,
+  pickNumber,
+  pickString,
+} from "@/lib/podcast/contracts";
 import { supabase } from "@/lib/supabase";
+
+const GENERATE_PODCAST_TIMEOUT_MS = 75_000;
+const GENERATE_PODCAST_MAX_ATTEMPTS = 3;
+const GENERATE_PODCAST_MIN_TIMEOUT_MS = 30_000;
+const GENERATE_PODCAST_MAX_TIMEOUT_MS = 180_000;
+
+type PodcastSpeaker = "Speaker1" | "Speaker2" | "Antoni" | "Zofia";
+type PodcastGenerationResult = {
+  conversation: Array<{
+    speaker: PodcastSpeaker;
+    text: string;
+  }>;
+};
+
+const GEMINI_EXPRESSIVE_ALLOWED_TAGS = ['[laughing]', '[sigh]', '[uhm]', '[short pause]'] as const;
+
+function extractProviderError(error: unknown): { code?: string; message?: string } {
+  const directMessage = isPlainObject(error) && typeof error.message === 'string'
+    ? error.message
+    : undefined;
+  const cause = isPlainObject(error) ? error.cause : undefined;
+  const nestedError = isPlainObject(cause) ? cause.error : undefined;
+
+  if (!isPlainObject(nestedError)) {
+    return { message: directMessage };
+  }
+
+  return {
+    code: typeof nestedError.code === 'string' ? nestedError.code : undefined,
+    message: typeof nestedError.message === 'string' ? nestedError.message : directMessage,
+  };
+}
+
+function createTextStreamResponse(chunks: Array<Record<string, unknown>>) {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+        }
+        controller.close();
+      },
+    }),
+    {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+      },
+    }
+  );
+}
+
+function createErrorStreamResponse(errorMessage: string) {
+  return createTextStreamResponse([
+    {
+      type: "error",
+      error: errorMessage,
+    },
+  ]);
+}
+
+function extractJsonCandidate(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withoutFence = trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  if (
+    (withoutFence.startsWith("{") && withoutFence.endsWith("}")) ||
+    (withoutFence.startsWith("[") && withoutFence.endsWith("]"))
+  ) {
+    return withoutFence;
+  }
+
+  const firstBrace = withoutFence.indexOf("{");
+  const lastBrace = withoutFence.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return withoutFence.slice(firstBrace, lastBrace + 1);
+  }
+
+  return null;
+}
+
+function getNestedErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const details = [error.message];
+  const nestedCause =
+    typeof (error as Error & { cause?: unknown }).cause === "object"
+      ? (error as Error & { cause?: { message?: unknown } }).cause
+      : null;
+
+  if (nestedCause?.message) {
+    details.push(String(nestedCause.message));
+  }
+
+  return details.join(" | ");
+}
+
+function isRetryablePodcastGenerationError(error: unknown): boolean {
+  const message = getNestedErrorMessage(error).toLowerCase();
+  const name =
+    error instanceof Error
+      ? String((error as Error & { name?: string }).name || "").toLowerCase()
+      : "";
+
+  return (
+    name.includes("noobjectgenerated") ||
+    message.includes("no object generated") ||
+    message.includes("could not parse the response") ||
+    message.includes("unexpected end of json input") ||
+    message.includes("empty response body") ||
+    message.includes("generated conversation was empty") ||
+    message.includes("aborted") ||
+    message.includes("timeout")
+  );
+}
+
+function clampGeneratePodcastTimeoutMs(value: number | null): number {
+  if (!value || !Number.isFinite(value)) {
+    return GENERATE_PODCAST_TIMEOUT_MS;
+  }
+
+  return Math.max(
+    GENERATE_PODCAST_MIN_TIMEOUT_MS,
+    Math.min(Math.round(value), GENERATE_PODCAST_MAX_TIMEOUT_MS)
+  );
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const {
-      content,
-      title,
-      language = 'en',
-      mainPrompt,
-      polishEndingPrompt,
-      hostPersonalitiesPromptPolish,
-      hostPersonalitiesPromptOther,
-      openaiApiKey: userOpenaiApiKey, // Added: Extract key from request
-      ttsEngine,
-    } = await req.json();
+    const parsedBody = await req.json();
+    if (!isPlainObject(parsedBody)) {
+      return NextResponse.json(
+        { error: "Request body must be a JSON object" },
+        { status: 400 }
+      );
+    }
 
-    const ttsEngineNormalized = String(ttsEngine || 'elevenlabs').toLowerCase();
-    const isTtsOmnivoice = ttsEngineNormalized === 'omnivoice';
+    const body = parsedBody as Record<string, unknown>;
+    const candidates = collectCandidateObjects(body);
+    const ttsCandidates = [
+      ...candidates,
+      ...candidates
+        .map((candidate) => findNestedObject(candidate, 'tts'))
+        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate)),
+    ];
+    const llmCandidates = candidates
+      .map((candidate) => findNestedObject(candidate, 'llm'))
+      .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+
+    const rawText = pickString(candidates, [
+      'raw_text',
+      'rawText',
+      'content',
+      'script_text',
+      'scriptText',
+      'transcript',
+      'text',
+      'prompt',
+      'description',
+    ]);
+    const title = pickString(candidates, ['title', 'name']) || undefined;
+    const language = pickString(candidates, ['language', 'lang', 'locale']) || 'en';
+    const mainPrompt = pickString(candidates, ['mainPrompt', 'main_prompt']) || undefined;
+    const polishEndingPrompt =
+      pickString(candidates, ['polishEndingPrompt', 'polish_ending_prompt']) || undefined;
+    const hostPersonalitiesPromptPolish =
+      pickString(candidates, ['hostPersonalitiesPromptPolish', 'host_personalities_prompt_polish']) ||
+      undefined;
+    const hostPersonalitiesPromptOther =
+      pickString(candidates, ['hostPersonalitiesPromptOther', 'host_personalities_prompt_other']) ||
+      undefined;
+    const modelNameOverride =
+      pickString(llmCandidates, ['model']) ||
+      pickString(candidates, ['model', 'openrouter_model', 'openrouterModel']) ||
+      undefined;
+    const llmAttemptTimeoutMs = clampGeneratePodcastTimeoutMs(
+      pickNumber(llmCandidates, ['timeout_ms', 'timeoutMs']) ||
+      pickNumber(candidates, ['timeout_ms', 'timeoutMs', 'llm_timeout_ms', 'llmTimeoutMs'])
+    );
+    const userOpenRouterApiKey =
+      pickString(candidates, ['openrouterApiKey', 'openrouter_api_key', 'openaiApiKey']) ||
+      undefined;
+    const ttsProvider = normalizeTtsProvider(
+      pickString(ttsCandidates, ['provider', 'ttsProvider', 'tts_provider', 'ttsEngine', 'tts_engine']) ||
+        'elevenlabs'
+    );
+    const geminiStyle = normalizeGeminiStyle(
+      pickString(ttsCandidates, ['geminiStyle', 'gemini_style']) || body.geminiStyle
+    );
+    const geminiTempo = normalizeGeminiTempo(
+      pickString(ttsCandidates, ['geminiTempo', 'gemini_tempo']) || body.geminiTempo
+    );
+    const inputConversation = normalizeConversationDraft(body.conversation);
+
+    if (inputConversation.length > 0) {
+      return NextResponse.json(
+        { error: "This endpoint only accepts raw_text and generates a conversation draft." },
+        { status: 400 }
+      );
+    }
+
+    const isPlainSpeakableTts = ttsProvider === 'omnivoice';
+    const isGeminiExpressive = ttsProvider === 'gemini' && geminiStyle === 'expressive-lite';
+    const isGeminiPlain = ttsProvider === 'gemini' && geminiStyle === 'plain';
 
     const podcastSchema = z.object({
       conversation: z
@@ -29,9 +237,11 @@ export async function POST(req: NextRequest) {
             text: z
               .string()
               .describe(
-                isTtsOmnivoice
+                isPlainSpeakableTts
                   ? "The text spoken by this speaker. Plain speakable sentences only. No bracketed stage directions, no emotional annotations, no em-dash interruptions, no non-verbal cues."
-                  : "The text spoken by this speaker, including natural speech patterns and nuances like [laughs], [pauses], [excited], etc."
+                  : isGeminiExpressive
+                    ? `The text spoken by this speaker. Clean spoken text with only Gemini-safe cues from this list: ${GEMINI_EXPRESSIVE_ALLOWED_TAGS.join(', ')}. Use exactly 2-4 cues across the full conversation and no other bracketed annotations.`
+                    : "The text spoken by this speaker, including natural speech patterns and nuances like [laughs], [pauses], [excited], etc."
               ),
           })
         )
@@ -40,9 +250,9 @@ export async function POST(req: NextRequest) {
         ),
     });
 
-    if (!content) {
+    if (!rawText) {
       return NextResponse.json(
-        { error: "Content is required" },
+        { error: "raw_text is required" },
         { status: 400 }
       );
     }
@@ -71,50 +281,47 @@ export async function POST(req: NextRequest) {
     // Determine final key to use
     // 1. Prioritize user key from request (if any)
     // 2. Fall back to admin settings if user is admin OR if this is a session-less request (webhook)
-    let apiKey = userOpenaiApiKey;
+    let apiKey = userOpenRouterApiKey;
     if (!apiKey && (isAdmin || !authHeader)) {
-      apiKey = adminSettings.openai_api_key;
+      apiKey = String(
+        process.env.OPENROUTER_API_KEY ||
+        adminSettings.openai_api_key ||
+        ''
+      ).trim();
     }
 
     if (!apiKey) {
       return NextResponse.json(
         {
-          error: "Please complete your API Key in Settings",
-          code: "MISSING_OPENAI_KEY"
+          error: "Please complete your OpenRouter API Key in Settings",
+          code: "MISSING_OPENROUTER_KEY"
         },
         { status: 403 }
       );
     }
 
-    const isOpenRouterKey = apiKey?.startsWith('sk-or-');
-    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
-
-    // Use OpenRouter if:
-    // 1. Key explicitly starts with 'sk-or-'
-    // 2. OR if we have an OPENROUTER_API_KEY env var (Force Gemini as default if set)
-    const useOpenRouter = isOpenRouterKey || !!openRouterApiKey;
-
-    let openaiClient;
-    const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
-
-    if (useOpenRouter) {
-      // Configure OpenRouter (compatible with OpenAI API)
-      openaiClient = createOpenAI({
-        apiKey: openRouterApiKey || apiKey,
-        baseURL: 'https://openrouter.ai/api/v1',
-      } as any);
-    } else {
-      // Fallback to OpenAI
-      openaiClient = createOpenAI({
-        apiKey: apiKey,
-      });
+    const envOpenRouterKey = String(process.env.OPENROUTER_API_KEY || '').trim();
+    if (!String(apiKey).startsWith('sk-or-')) {
+      if (envOpenRouterKey) {
+        apiKey = envOpenRouterKey;
+      } else {
+        return NextResponse.json(
+          {
+            error: "This endpoint now requires an OpenRouter API key.",
+            code: "INVALID_OPENROUTER_KEY",
+          },
+          { status: 403 }
+        );
+      }
     }
 
-    // Use a model available on OpenRouter (or OpenAI if not using OpenRouter)
-    // OpenRouter format: openai/gpt-4o-mini, anthropic/claude-3.5-sonnet, etc.
-    const modelName = useOpenRouter
-      ? (process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini')
-      : 'gpt-4o-mini';
+    const provider = 'OpenRouter';
+    const openaiClient = createOpenAI({
+      apiKey,
+      baseURL: 'https://openrouter.ai/api/v1',
+    } satisfies OpenAIProviderSettings);
+
+    const modelName = modelNameOverride || process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
 
     const model = openaiClient(modelName);
 
@@ -247,6 +454,7 @@ Antoni (Male - Energetic & Naive):
   pierona, rychtyg, siekiera, łokno, cza, żech, czytoł, pieruńsko.
 - Signature: "Jo Ci godom…", "Kaj tam…", "Rychtyg…", "Pierona!".
 - Wyciąga absurdalne konsekwencje hype'u. Pyta naiwne pytania.
+- Emocja: ma brzmieć jak gość, który się serio zajarał tematem i ledwo nadąża za własną ekscytacją.
 
 Zofia (Female - Sarcastic & Cynical):
 - Sarkastyczna, cyniczna, sucha. Zbija entuzjazm jednym zdaniem.
@@ -257,6 +465,7 @@ Zofia (Female - Sarcastic & Cynical):
   dyć, ftory, juści, kozdy, wom, mosz, fcora.
 - Signature: "Hej Antoni…", "Tyż mi…", "Dyć…", "Kiebyś pomyślał…".
 - Nie moralizuje — żartuje. Jedna sarkastyczna pointa wystarczy.
+- Emocja: ma brzmieć jak ktoś rozbawiony cudzą naiwnością, ale bez teatralnego przerysowania.
 
 PRZYKŁAD WZORCOWEJ WYMIANY ROGAN-STYLE (naśladuj tempo, nie słowa):
 Antoni: "Jo Ci godom, siekiera jak oni ten model wypuścili — cołki internet szaleje!"
@@ -294,146 +503,190 @@ Speaker2 (Female - Pessimistic & Arrogant):
 - Makes sarcastic comments and eye-rolls
 - Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
 
-    // Use prompts from request or fallback to defaults
-    const usedMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPrompt;
+    const defaultMainPromptGeminiExpressivePolish = `Rules for Polish Gemini TTS:
+- Spell out numbers and model versions in words; no digits or code-like notation.
+- Make every line react to the previous one: fact, joke, counter, callback.
+- No long explanations, summaries, moralizing, or em dash interruptions.
+- Antoni uses masculine Polish forms; Zofia uses feminine forms.
+- Antoni addresses Zofia with feminine forms; Zofia addresses Antoni with masculine forms.
+- Strong dialect flavor, but still understandable.`;
+
     const usedPolishEndingPrompt = polishEndingPrompt || adminSettings.polish_ending_prompt || defaultPolishEndingPrompt;
+
+    const defaultHostPersonalitiesPolishGeminiExpressive = `STYLE: expressive_cues_16, śląsko-góralski, szybka pyskówka.
+
+Output exactly 16 alternating turns: Antoni, Zofia, Antoni, Zofia.
+Each turn max 120 characters; target 40-70. At least 4 turns are 2-7 words.
+Use exactly 4 total cues from: [laughing], [sigh], [uhm], [short pause].
+Use at least 4 questions. No other bracketed text.
+
+Antoni: male, Silesian hype, naive and funny. Use natural markers: jo, godom, pierona, rychtyg, cza, kaj, gryfny, idymy, żech, siekiera.
+Zofia: female, Goral counterpunch, dry sarcasm. Her turns are usually shorter and sharper than Antoni's. Use: hej, dyć, kiej, kiebyś, mosz, juści, pado, fcora, tyż.
+
+Rhythm example:
+Antoni: "[laughing] Jo ci godom, Zofia, ten Flesz to rakieta za grosze!"
+Zofia: "Rakieta za grosze? Hej, brzmi jak ogłoszenie z parkingu."
+Antoni: "Ale robi reakt, trzy de, wszystko! Rychtyg magia."
+Zofia: "[sigh] Magia kończy się, kiej przychodzi faktura."`;
 
     // Build host personalities section - use provided prompts or defaults
     let hostPersonalitiesSection = '';
     if (isPolish) {
-      hostPersonalitiesSection = hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish || defaultHostPersonalitiesPolish;
+      const defaultPolishHostPrompt = isGeminiExpressive
+        ? defaultHostPersonalitiesPolishGeminiExpressive
+        : defaultHostPersonalitiesPolish;
+      hostPersonalitiesSection = hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish || defaultPolishHostPrompt;
     } else {
       const personalitiesPrompt = hostPersonalitiesPromptOther || adminSettings.host_prompt_other || defaultHostPersonalitiesOther;
       hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
     }
 
+    const defaultMainPromptForRequest =
+      isPolish && isGeminiExpressive ? defaultMainPromptGeminiExpressivePolish : defaultMainPrompt;
+    const effectiveMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPromptForRequest;
+
     console.log(`[Generate Podcast] Request starting: title="${title || 'Article'}", language="${language}"`);
     console.log(`[Generate Podcast] Models: ${modelName} via ${provider}`);
+    console.log(`[Generate Podcast] LLM timeout per attempt: ${llmAttemptTimeoutMs}ms`);
     console.log(`[Generate Podcast] Host Personalities Section starts with: ${hostPersonalitiesSection.substring(0, 50)}...`);
 
-    let result;
     try {
-      console.log(`[Generate Podcast] Calling LLM with prompt length: ${300 + hostPersonalitiesSection.length + usedMainPrompt.length}...`);
+      console.log(`[Generate Podcast] Calling LLM with prompt length: ${300 + hostPersonalitiesSection.length + effectiveMainPrompt.length}...`);
       
-      const ttsGuard = isTtsOmnivoice
-        ? `CRITICAL TTS RULES (OmniVoice output — overrides ANY conflicting instruction later in this prompt):
+      const ttsGuard = isPlainSpeakableTts
+        ? `CRITICAL TTS RULES (Plain-speech TTS output for ${ttsProvider} — overrides ANY conflicting instruction later in this prompt):
 - Do NOT include emotional annotations like [laughs], [chuckles], [sighs], [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed], [eye roll], [pauses], or any bracketed stage directions.
 - Do NOT use em-dashes (—) to show interruptions. Do not truncate sentences with dashes. Every line must be a complete, self-contained sentence.
 - No non-verbal cues, no action descriptions, no parenthetical asides.
 - Output only clean speakable text a neural TTS will read aloud verbatim.
 
 `
+        : isGeminiExpressive
+          ? `CRITICAL TTS RULES (Gemini expressive-lite output — overrides ANY conflicting instruction later in this prompt):
+- Only these bracketed delivery cues are allowed, and only when genuinely helpful: ${GEMINI_EXPRESSIVE_ALLOWED_TAGS.join(', ')}.
+- Do NOT use any other bracketed annotations such as [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed], [eye roll], [chuckles], [pauses], or similar.
+- Keep the conversation lively and energetic, but the text must remain clean and directly speakable.
+- Use short, punchy lines. Fast reactions are good, but every line must still be a complete spoken utterance.
+- Use bracketed cues sparingly: max one cue in a line, and only in lines that truly benefit from a stronger emotional turn.
+- Prefer cues at the beginning of a sentence or just before the emotional fragment, never stack multiple cues in one utterance.
+- Emotional shape matters more than tag count: the dialogue should feel animated even if many lines contain no cue at all.
+- Antoni may occasionally use [laughing] or [uhm] when he gets overexcited, surprised, or verbally trips over his own hype.
+- Zofia may occasionally use [sigh] or [short pause] when delivering dry sarcasm, dismissal, or a cold skeptical punchline.
+- Never put emotional cues in every line. In a short 7-10 exchange podcast, usually 2-4 total cues across the whole conversation is enough.
+- Do not turn the speakers into cartoon characters. Antoni should sound energized and impulsive; Zofia should sound dry, ironic, and mildly exasperated.
+- ${geminiTempo === 'fast'
+  ? 'Bias toward brisk pacing, tight turn-taking, and minimal dead air.'
+  : 'Bias toward natural conversational pacing with a little momentum.'}
+
+`
+          : isGeminiPlain
+            ? `CRITICAL TTS RULES (Gemini plain output — overrides ANY conflicting instruction later in this prompt):
+- Do NOT include bracketed stage directions or emotional annotations.
+- Keep lines clean, direct, and fully speakable.
+- Avoid em-dash interruptions and avoid unfinished thoughts.
+
+`
         : '';
 
-      result = await streamObject({
-        model,
-        schema: podcastSchema,
-        prompt: `${ttsGuard}IMPORTANT: Make this a VERY SHORT, high-energy podcast of about 1.5-2 minutes. Aim for 1200-1800 characters total (ABSOLUTE MAXIMUM — NEVER EXCEED 2200 chars). Use only 7-9 short and dynamic exchanges. Condense only the most vital points.
+      const podcastFormatInstruction = isPolish && isGeminiExpressive
+        ? `IMPORTANT: Make this a fast Silesian-Goral Gemini expressive-lite podcast. Use EXACTLY 16 short alternating turns: Antoni, Zofia, Antoni, Zofia. Aim for 650-950 characters total. Keep it snappy, reactive, funny, and directly speakable.`
+        : `IMPORTANT: Make this a VERY SHORT, high-energy podcast of about 1.5-2 minutes. Aim for 1200-1800 characters total (ABSOLUTE MAXIMUM — NEVER EXCEED 2200 chars). Use only 7-9 short and dynamic exchanges. Condense only the most vital points.`;
+
+      const prompt = `${ttsGuard}${podcastFormatInstruction}
 
 Create a highly dynamic, natural podcast conversation in ${languageName} between Antoni and Zofia based on the provided content.
 
 Title: ${title || "Article"}
-Content: ${content}
+Content: ${rawText}
 
 ${hostPersonalitiesSection}
-${usedMainPrompt || ''}
+${effectiveMainPrompt || ''}
 
-${isPolish ? usedPolishEndingPrompt : ''}`,
-      });
-    } catch (apiError: any) {
+${isPolish ? usedPolishEndingPrompt : ''}`;
+
+      let finalObject: PodcastGenerationResult | null = null;
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= GENERATE_PODCAST_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          console.log(
+            `[Generate Podcast] LLM attempt ${attempt}/${GENERATE_PODCAST_MAX_ATTEMPTS}`
+          );
+
+          const result = await generateObject({
+            model,
+            schema: podcastSchema,
+            prompt,
+            maxRetries: 0,
+            abortSignal: AbortSignal.timeout(llmAttemptTimeoutMs),
+            experimental_repairText: async ({ text }) => extractJsonCandidate(text),
+          });
+
+          const normalizedConversation = normalizeConversationDraft(
+            result.object?.conversation
+          );
+
+          if (normalizedConversation.length === 0) {
+            throw new Error("Generated conversation was empty.");
+          }
+
+          finalObject = {
+            conversation: normalizedConversation.map((item) => ({
+              speaker: item.speaker as PodcastSpeaker,
+              text: item.text,
+            })),
+          };
+          break;
+        } catch (error) {
+          lastError = error;
+          const retryable = isRetryablePodcastGenerationError(error);
+          console.warn(
+            `[Generate Podcast] LLM attempt ${attempt}/${GENERATE_PODCAST_MAX_ATTEMPTS} failed: ${getNestedErrorMessage(
+              error
+            )}`
+          );
+
+          if (!retryable || attempt === GENERATE_PODCAST_MAX_ATTEMPTS) {
+            throw error;
+          }
+        }
+      }
+
+      if (!finalObject) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error("Failed to generate podcast conversation.");
+      }
+
+      return createTextStreamResponse([
+        {
+          type: "partial",
+          data: finalObject,
+        },
+        {
+          type: "complete",
+          data: finalObject,
+        },
+      ]);
+    } catch (apiError: unknown) {
       console.error("API error:", apiError);
 
       // Check for specific error types
       let errorMessage = 'Failed to generate podcast conversation';
-      const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
+      const providerError = extractProviderError(apiError);
 
-      if (apiError?.cause?.error?.code === 'insufficient_quota') {
+      if (providerError.code === 'insufficient_quota') {
         errorMessage = `${provider} API quota exceeded. Please check your billing and plan details.`;
-      } else if (apiError?.cause?.error?.code === 'invalid_api_key') {
+      } else if (providerError.code === 'invalid_api_key') {
         errorMessage = `Invalid ${provider} API key. Please check your API key configuration.`;
-      } else if (apiError?.cause?.error?.message) {
-        errorMessage = `${provider} API error: ${apiError.cause.error.message}`;
-      } else if (apiError?.message) {
-        errorMessage = `Error: ${apiError.message}`;
+      } else if (providerError.message) {
+        errorMessage = providerError.code
+          ? `${provider} API error: ${providerError.message}`
+          : `Error: ${providerError.message}`;
       }
 
-      // Return error as stream
-      const errorStream = new ReadableStream({
-        start(controller) {
-          const errorChunk = JSON.stringify({
-            type: 'error',
-            error: errorMessage
-          }) + '\n';
-          controller.enqueue(new TextEncoder().encode(errorChunk));
-          controller.close();
-        },
-      });
-
-      return new Response(errorStream, {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Transfer-Encoding': 'chunked',
-        },
-      });
+      return createErrorStreamResponse(errorMessage);
     }
-
-    // Create a readable stream to send partial objects to client
-    const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const partialObject of result.partialObjectStream) {
-            // Send each partial update as JSON
-            const chunk = JSON.stringify({
-              type: 'partial',
-              data: partialObject
-            }) + '\n';
-
-            controller.enqueue(new TextEncoder().encode(chunk));
-          }
-
-          // Send final complete object
-          const finalObject = await result.object;
-          const finalChunk = JSON.stringify({
-            type: 'complete',
-            data: finalObject
-          }) + '\n';
-
-          controller.enqueue(new TextEncoder().encode(finalChunk));
-          controller.close();
-        } catch (error: any) {
-          console.error("Streaming error:", error);
-
-          let errorMessage = 'Failed to generate podcast conversation';
-          const provider = useOpenRouter ? 'OpenRouter' : 'OpenAI';
-
-          // Check for specific error types
-          if (error?.cause?.error?.code === 'insufficient_quota') {
-            errorMessage = `${provider} API quota exceeded. Please check your billing and plan details.`;
-          } else if (error?.cause?.error?.code === 'invalid_api_key') {
-            errorMessage = `Invalid ${provider} API key. Please check your API key configuration.`;
-          } else if (error?.cause?.error?.message) {
-            errorMessage = `${provider} API error: ${error.cause.error.message}`;
-          } else if (error?.message) {
-            errorMessage = `Error: ${error.message}`;
-          }
-
-          const errorChunk = JSON.stringify({
-            type: 'error',
-            error: errorMessage
-          }) + '\n';
-
-          controller.enqueue(new TextEncoder().encode(errorChunk));
-          controller.close();
-        }
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Transfer-Encoding': 'chunked',
-      },
-    });
   } catch (error) {
     console.error("Error generating podcast:", error);
     return NextResponse.json(

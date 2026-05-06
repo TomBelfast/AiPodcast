@@ -1,10 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createDialogue } from '@/actions/dialogue';
-import { CreateDialogueRequest } from '@/types';
 import { promises as fs } from 'fs';
 import path from 'path';
 
 const ARCHIVE_DIR = path.join(process.cwd(), 'archive');
+
+interface GeneratedConversationItem {
+    speaker: string;
+    text: string;
+}
+
+interface GenerateStreamEvent {
+    type?: string;
+    data?: {
+        conversation?: GeneratedConversationItem[];
+    };
+    error?: string;
+}
 
 // Ensure archive directory exists
 async function ensureArchiveDir() {
@@ -19,14 +31,24 @@ export async function POST(req: NextRequest) {
     try {
         // 1. Authenticate
         const apiKey = req.headers.get('x-api-key');
-        const validApiKey = process.env.APP_API_KEY || '1824d3c217681b1dabf6e9764c277781';
+        const validApiKey = process.env.APP_API_KEY;
+
+        if (!validApiKey) {
+            return NextResponse.json({ error: 'APP_API_KEY is not configured' }, { status: 500 });
+        }
 
         if (apiKey !== validApiKey) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
         // 2. Parse Request
-        const body = await req.json();
+        const body = await req.json() as {
+            transcript?: string;
+            title?: string;
+            language?: string;
+            voice1?: string;
+            voice2?: string;
+        };
         const { transcript, title, language = 'pl', voice1, voice2 } = body;
 
         console.log(`[API v1] Incoming generation request: title="${title || 'Untitled'}", language="${language}"`);
@@ -64,7 +86,7 @@ export async function POST(req: NextRequest) {
         const reader = generateRes.body?.getReader();
         if (!reader) throw new Error('Failed to read generation stream');
 
-        let conversation = null;
+        let conversation: GeneratedConversationItem[] | null = null;
         const decoder = new TextDecoder();
         let buffer = '';
 
@@ -83,14 +105,14 @@ export async function POST(req: NextRequest) {
                 if (!trimmedLine) continue;
 
                 try {
-                    const parsed = JSON.parse(trimmedLine);
+                    const parsed = JSON.parse(trimmedLine) as GenerateStreamEvent;
                     if (parsed.type === 'complete') {
-                        conversation = parsed.data.conversation;
+                        conversation = parsed.data?.conversation ?? null;
                     } else if (parsed.type === 'error') {
                         throw new Error(parsed.error || 'Unknown error during generation');
                     }
-                } catch (e: any) {
-                    if (e.name === 'SyntaxError') {
+                } catch (e: unknown) {
+                    if (e instanceof SyntaxError) {
                         console.warn('Incomplete JSON line, skipping until next:', trimmedLine);
                     } else {
                         throw e; // Rethrow actual errors (like the generation error)
@@ -103,9 +125,9 @@ export async function POST(req: NextRequest) {
         buffer += decoder.decode(new Uint8Array(), { stream: false });
         if (buffer.trim()) {
             try {
-                const parsed = JSON.parse(buffer.trim());
+                const parsed = JSON.parse(buffer.trim()) as GenerateStreamEvent;
                 if (parsed.type === 'complete') {
-                    conversation = parsed.data.conversation;
+                    conversation = parsed.data?.conversation ?? null;
                 }
             } catch (e) {
                 console.warn('Final buffer chunk could not be parsed', e);
@@ -117,11 +139,11 @@ export async function POST(req: NextRequest) {
         }
 
         console.log(`[API v1] Successfully generated conversation with ${conversation.length} items.`);
-        const totalCharCount = conversation.reduce((acc: number, item: any) => acc + item.text.length, 0);
+        const totalCharCount = conversation.reduce((acc, item) => acc + item.text.length, 0);
         console.log(`[API v1] Total conversation text length: ${totalCharCount} characters.`);
         
         console.log("--- GENERATED CONVERSATION START ---");
-        conversation.forEach((item: any, i: number) => {
+        conversation.forEach((item, i) => {
           console.log(`${i+1}. ${item.speaker}: ${item.text}`);
         });
         console.log("--- GENERATED CONVERSATION END ---");
@@ -163,10 +185,10 @@ export async function POST(req: NextRequest) {
             message: 'Podcast generated successfully',
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error('API v1 Error:', error);
         return NextResponse.json(
-            { error: error.message || 'Internal Server Error' },
+            { error: error instanceof Error ? error.message : 'Internal Server Error' },
             { status: 500 }
         );
     }

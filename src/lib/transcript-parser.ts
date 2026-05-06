@@ -32,7 +32,7 @@ export interface Word {
 }
 
 export interface NormalizedTranscript {
-  source: "elevenlabs";
+  source: string;
   version: 1;
   job_id: string | null;
   title: string | null;
@@ -47,6 +47,51 @@ export interface NormalizedTranscript {
   warnings: string[];
 }
 
+interface TranscriptAlignment {
+  characters?: string[];
+  characterStartTimesSeconds?: number[];
+  characterEndTimesSeconds?: number[];
+}
+
+interface ValidTranscriptAlignment {
+  characters: string[];
+  characterStartTimesSeconds: number[];
+  characterEndTimesSeconds: number[];
+}
+
+interface TranscriptVoiceSegment {
+  speaker?: string | null;
+  voiceId?: string | null;
+  dialogueInputIndex?: number | null;
+  characterStartIndex?: number | null;
+  characterEndIndex?: number | null;
+  startTimeSeconds?: number | null;
+  endTimeSeconds?: number | null;
+}
+
+interface TranscriptConversationItem {
+  text?: string;
+}
+
+interface TranscriptSpeakerMetadata {
+  name?: string;
+  voiceId?: string | null;
+  gender?: string | null;
+  personality?: string | null;
+}
+
+interface ElevenLabsTranscriptInput {
+  jobId?: string | null;
+  title?: string | null;
+  audioFilename?: string | null;
+  timestamp?: string | null;
+  speakers?: Record<string, TranscriptSpeakerMetadata>;
+  conversation?: TranscriptConversationItem[];
+  voiceSegments?: TranscriptVoiceSegment[];
+  alignment?: TranscriptAlignment | null;
+  normalizedAlignment?: TranscriptAlignment | null;
+}
+
 function formatSrtTime(seconds: number): string {
   const totalMs = Math.round(seconds * 1000);
   const ms = totalMs % 1000;
@@ -59,26 +104,32 @@ function formatSrtTime(seconds: number): string {
   return `${hh.toString().padStart(2, '0')}:${mm.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')},${ms.toString().padStart(3, '0')}`;
 }
 
-export function parseElevenLabsTranscript(input: any): NormalizedTranscript {
-  const warnings: string[] = [];
-  const alignment = input.normalizedAlignment || input.alignment;
+function isValidAlignment(alignment: TranscriptAlignment | null | undefined): alignment is ValidTranscriptAlignment {
+  return Boolean(
+    alignment &&
+      Array.isArray(alignment.characters) &&
+      Array.isArray(alignment.characterStartTimesSeconds) &&
+      Array.isArray(alignment.characterEndTimesSeconds) &&
+      alignment.characters.length === alignment.characterStartTimesSeconds.length &&
+      alignment.characters.length === alignment.characterEndTimesSeconds.length
+  );
+}
 
-  if (!alignment) {
+export function parseElevenLabsTranscript(input: ElevenLabsTranscriptInput): NormalizedTranscript {
+  const warnings: string[] = [];
+  const alignmentCandidate = input.normalizedAlignment || input.alignment;
+
+  if (!alignmentCandidate) {
     warnings.push("brak alignment i words będzie puste");
-  } else if (
-    !alignment.characters ||
-    !alignment.characterStartTimesSeconds ||
-    !alignment.characterEndTimesSeconds ||
-    alignment.characters.length !== alignment.characterStartTimesSeconds.length ||
-    alignment.characters.length !== alignment.characterEndTimesSeconds.length
-  ) {
+  } else if (!isValidAlignment(alignmentCandidate)) {
     warnings.push("lengths alignment.characters, characterStartTimesSeconds, characterEndTimesSeconds się nie zgadzają");
   }
+  const alignment = isValidAlignment(alignmentCandidate) ? alignmentCandidate : null;
 
   // Parse Speakers
   const speakers: Speaker[] = [];
   if (input.speakers) {
-    for (const [id, data] of Object.entries(input.speakers) as [string, any][]) {
+    for (const [id, data] of Object.entries(input.speakers)) {
       speakers.push({
         id: id,
         name: data.name ?? id,
@@ -92,16 +143,18 @@ export function parseElevenLabsTranscript(input: any): NormalizedTranscript {
   // Parse Segments
   const segments: Segment[] = [];
   if (input.voiceSegments) {
-    input.voiceSegments.forEach((vs: any, idx: number) => {
+    input.voiceSegments.forEach((vs, idx) => {
       let text = "";
       const dialogueInputIndex = vs.dialogueInputIndex;
 
       if (dialogueInputIndex !== null && dialogueInputIndex !== undefined && input.conversation && input.conversation[dialogueInputIndex]) {
-        text = input.conversation[dialogueInputIndex].text;
+        text = input.conversation[dialogueInputIndex].text ?? "";
       } else {
         warnings.push(`dialogueInputIndex jest niepoprawny dla segmentu ${idx}`);
         if (alignment) {
-          text = alignment.characters.slice(vs.characterStartIndex, vs.characterEndIndex).join("");
+          const characterStartIndex = vs.characterStartIndex ?? 0;
+          const characterEndIndex = vs.characterEndIndex ?? characterStartIndex;
+          text = alignment.characters.slice(characterStartIndex, characterEndIndex).join("");
         }
       }
 
@@ -112,7 +165,7 @@ export function parseElevenLabsTranscript(input: any): NormalizedTranscript {
 
       const startTime = vs.startTimeSeconds ?? 0;
       const endTime = vs.endTimeSeconds ?? startTime;
-      if (vs.startTimeSeconds === undefined || vs.endTimeSeconds === undefined || vs.startTimeSeconds > vs.endTimeSeconds) {
+      if (vs.startTimeSeconds == null || vs.endTimeSeconds == null || startTime > endTime) {
         warnings.push(`segment ${idx} ma brakujące lub nielogiczne czasy`);
       }
 
@@ -149,9 +202,9 @@ export function parseElevenLabsTranscript(input: any): NormalizedTranscript {
     let globalWordId = 0;
     const punctuation = '.,!?;:()[]{}"„”\'«»';
 
-    input.voiceSegments.forEach((vs: any, segIdx: number) => {
-      const start = vs.characterStartIndex;
-      const end = vs.characterEndIndex;
+    input.voiceSegments.forEach((vs, segIdx) => {
+      const start = vs.characterStartIndex ?? 0;
+      const end = vs.characterEndIndex ?? start;
 
       const chars = alignment.characters.slice(start, end);
       const charStarts = alignment.characterStartTimesSeconds.slice(start, end);
@@ -175,7 +228,7 @@ export function parseElevenLabsTranscript(input: any): NormalizedTranscript {
 
         if (startIndex <= endIndex) {
           const cleanedText = buffer.slice(startIndex, endIndex + 1).join("");
-          let startTime = bufferStarts[startIndex];
+          const startTime = bufferStarts[startIndex];
           let endTime = bufferEnds[endIndex];
 
           if (endTime < startTime) endTime = startTime;

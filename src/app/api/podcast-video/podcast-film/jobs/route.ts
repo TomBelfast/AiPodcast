@@ -3,7 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
-import { Agent, fetch as undiciFetch } from 'undici';
+import { Agent, FormData as UndiciFormData, fetch as undiciFetch } from 'undici';
 import { createDialogue } from '@/actions/dialogue';
 import { createGeminiDialogue } from '@/actions/gemini-tts';
 import { getEffectiveAdminSettings } from '@/lib/admin-settings';
@@ -64,6 +64,7 @@ const OMNIVOICE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const WORKER_PROBE_TIMEOUT_MS = 2500;
 const INTERNAL_GENERATE_PODCAST_TIMEOUT_MS = 8 * 60 * 1000;
 const INTERNAL_GENERATE_PODCAST_ATTEMPT_TIMEOUT_MS = 150 * 1000;
+const OPENAI_WHISPER_TIMEOUT_MS = 2 * 60 * 1000;
 const OMNIVOICE_JOB_DISPATCHER = new Agent({
   headersTimeout: OMNIVOICE_JOB_TIMEOUT_MS,
   bodyTimeout: OMNIVOICE_JOB_TIMEOUT_MS,
@@ -82,6 +83,7 @@ const OMNIVOICE_BASE_URL =
   process.env.OMNIVOICE_BASE_URL?.trim() || 'http://192.168.0.13:8766';
 const SOULX_BASE_URL =
   process.env.SOULX_BASE_URL?.trim() || 'http://192.168.0.13:7002';
+const GEMINI_FEMALE_AUDIO_TEMPO = 1.1;
 
 type Segment = { speaker: string; text: string };
 type TtsEngine = 'omnivoice' | 'gemini' | 'elevenlabs';
@@ -122,6 +124,14 @@ type PipelineConfig = {
   captionMarginV: number;
   captionLanguage: string;
   title: string;
+  firstFrameStyle: FirstFrameStyle;
+};
+type FirstFrameStyle = {
+  titleSize: number;
+  titleMarginX: number;
+  titleOffsetY: number;
+  titleColor: string;
+  titleOutlineColor: string;
 };
 type PreparedPipelineInput = {
   segments: Segment[];
@@ -203,6 +213,72 @@ const GEMINI_VOICE_OPTIONS_BY_ID = new Map(
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readNumberInRange(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function normalizeHexColor(value: unknown, fallback: string): string {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return /^#[0-9a-f]{6}$/i.test(text) ? text.toUpperCase() : fallback;
+}
+
+const FIRST_FRAME_PREVIEW_SCALE = 2.56;
+const FIRST_FRAME_TITLE_SCALE_X = 1.16;
+const DEFAULT_FIRST_FRAME_TITLE_SIZE = 43;
+const DEFAULT_FIRST_FRAME_STYLE: FirstFrameStyle = {
+  titleSize: DEFAULT_FIRST_FRAME_TITLE_SIZE,
+  titleMarginX: 18,
+  titleOffsetY: 0,
+  titleColor: '#25FF00',
+  titleOutlineColor: '#050608',
+};
+
+function readFirstFrameTitleSize(value: unknown): number {
+  if (value === undefined || value === null || value === '') {
+    return DEFAULT_FIRST_FRAME_TITLE_SIZE;
+  }
+  return readNumberInRange(value, DEFAULT_FIRST_FRAME_TITLE_SIZE, 28, 58);
+}
+
+function resolveFirstFrameStyle(value: unknown): FirstFrameStyle {
+  if (!isPlainObject(value)) {
+    return DEFAULT_FIRST_FRAME_STYLE;
+  }
+
+  return {
+    titleSize: readFirstFrameTitleSize(value.titleSize ?? value.title_size),
+    titleMarginX: readNumberInRange(
+      value.titleMarginX ?? value.title_margin_x,
+      DEFAULT_FIRST_FRAME_STYLE.titleMarginX,
+      0,
+      46
+    ),
+    titleOffsetY: readNumberInRange(
+      value.titleOffsetY ?? value.title_offset_y,
+      DEFAULT_FIRST_FRAME_STYLE.titleOffsetY,
+      -120,
+      120
+    ),
+    titleColor: normalizeHexColor(
+      value.titleColor ?? value.title_color,
+      DEFAULT_FIRST_FRAME_STYLE.titleColor
+    ),
+    titleOutlineColor: normalizeHexColor(
+      value.titleOutlineColor ?? value.title_outline_color,
+      DEFAULT_FIRST_FRAME_STYLE.titleOutlineColor
+    ),
+  };
 }
 
 function normalizeVoiceGender(value: string | undefined): VoiceGenderBucket {
@@ -390,6 +466,21 @@ function resolvePodcastFilmElevenLabsApiKey(explicitKey?: string | null): string
 
   const adminSettings = getEffectiveAdminSettings();
   return String(adminSettings.elevenlabs_api_key || '').trim() || null;
+}
+
+function resolvePodcastFilmWhisperApiKey(): string | null {
+  const envKey = String(process.env.OPENAI_API_KEY || '').trim();
+  if (envKey) {
+    return envKey;
+  }
+
+  const adminSettings = getEffectiveAdminSettings();
+  const settingsKey = String(adminSettings.openai_api_key || '').trim();
+  if (settingsKey && !settingsKey.toLowerCase().startsWith('sk-or-')) {
+    return settingsKey;
+  }
+
+  return null;
 }
 
 function normalizeConversationItems(conversation: unknown): ConversationItem[] {
@@ -690,10 +781,39 @@ function resolveGenderedVoicePair(
 }
 
 const BRACKETED_TAG_PATTERN = /\[[^\]]*\]/g;
-function stripTtsInlineTags(text: string): string {
+const GEMINI_EXPRESSIVE_ALLOWED_INLINE_TAGS = new Set([
+  '[laughing]',
+  '[sigh]',
+  '[uhm]',
+  '[short pause]',
+]);
+const CAPTION_TECHNICAL_INLINE_TAGS = new Set([
+  '[laughing]',
+  '[sigh]',
+  '[uhm]',
+  '[short pause]',
+]);
+
+function stripTtsInlineTags(
+  text: string,
+  allowedBracketedTags: ReadonlySet<string> = new Set()
+): string {
   return text
-    .replace(BRACKETED_TAG_PATTERN, ' ')
+    .replace(BRACKETED_TAG_PATTERN, (tag) => {
+      const normalizedTag = tag.trim().toLowerCase();
+      return allowedBracketedTags.has(normalizedTag) ? ` ${normalizedTag} ` : ' ';
+    })
     .replace(/\s*—\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripCaptionInlineTags(text: string): string {
+  return text
+    .replace(BRACKETED_TAG_PATTERN, (tag) => {
+      const normalizedTag = tag.trim().toLowerCase();
+      return CAPTION_TECHNICAL_INLINE_TAGS.has(normalizedTag) ? ' ' : ` ${tag} `;
+    })
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -843,12 +963,241 @@ async function runFfmpeg(args: string[]): Promise<{ stdout: string; stderr: stri
   });
 }
 
+type SafeMp4MetadataValue = string | number | boolean | null | undefined;
+
+function sanitizeMp4MetadataValue(value: SafeMp4MetadataValue): string | null {
+  if (value === null || value === undefined) return null;
+  const text = String(value).replace(/[\r\n]+/g, ' ').trim();
+  if (!text) return null;
+  return text.slice(0, 500);
+}
+
+async function writeSafeMp4GenerationMetadata(
+  mp4Path: string,
+  metadata: Record<string, SafeMp4MetadataValue>
+): Promise<{ elapsed_ms: number; metadata_count: number }> {
+  const entries = Object.entries(metadata)
+    .map(([key, value]) => [key, sanitizeMp4MetadataValue(value)] as const)
+    .filter((entry): entry is readonly [string, string] => entry[1] !== null);
+
+  if (entries.length === 0) {
+    return { elapsed_ms: 0, metadata_count: 0 };
+  }
+
+  const startedAt = Date.now();
+  const tmpPath = mp4Path.replace(/\.mp4$/i, '') + '.metadata.mp4';
+  const metadataArgs = entries.flatMap(([key, value]) => ['-metadata', `${key}=${value}`]);
+
+  try {
+    await runFfmpeg([
+      '-y',
+      '-i', mp4Path,
+      '-map', '0',
+      '-c', 'copy',
+      '-movflags', '+faststart+use_metadata_tags',
+      ...metadataArgs,
+      tmpPath,
+    ]);
+    await fs.rename(tmpPath, mp4Path);
+  } catch (error) {
+    await fs.unlink(tmpPath).catch(() => {});
+    throw error;
+  }
+
+  return { elapsed_ms: Date.now() - startedAt, metadata_count: entries.length };
+}
+
 type WhisperWord = { text: string; start: number; end: number };
+
+const DIALECT_EQUIVALENT_GROUPS = [
+  ['jo', 'ja'],
+  ['mo', 'ma'],
+  ['mosz', 'masz'],
+  ['mom', 'mam'],
+  ['tyz', 'tez'],
+  ['niy', 'nie'],
+  ['kiebys', 'kiedys', 'gdybys'],
+  ['godom', 'gadam'],
+  ['goda', 'gada'],
+  ['godajom', 'gadaja'],
+  ['bydzie', 'bedzie'],
+  ['bydymy', 'bedziemy'],
+  ['idymy', 'idziemy'],
+  ['widza', 'widze'],
+  ['czyto', 'czyta'],
+  ['naso', 'nasza'],
+] as const;
+
+const DIALECT_EQUIVALENTS = new Map<string, Set<string>>();
+for (const group of DIALECT_EQUIVALENT_GROUPS) {
+  for (const token of group) {
+    const equivalents = DIALECT_EQUIVALENTS.get(token) || new Set<string>();
+    for (const other of group) {
+      if (other !== token) {
+        equivalents.add(other);
+      }
+    }
+    DIALECT_EQUIVALENTS.set(token, equivalents);
+  }
+}
+
+function makeComparableTokenVariants(value: string): string[] {
+  const normalized = normalizeComparableToken(value);
+  const splitVariants = normalized.split(/[\/|]+/);
+  const compacted = [normalized, ...splitVariants]
+    .map((candidate) => candidate.replace(/[^0-9a-z]+/g, ''))
+    .filter(Boolean);
+  return Array.from(new Set(compacted));
+}
+
+function areDialectEquivalent(a: string, b: string): boolean {
+  return DIALECT_EQUIVALENTS.get(a)?.has(b) === true;
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+
+  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  const current = Array.from({ length: b.length + 1 }, () => 0);
+
+  for (let i = 1; i <= a.length; i++) {
+    current[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + substitutionCost
+      );
+    }
+    for (let j = 0; j <= b.length; j++) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[b.length];
+}
+
+function scoreComparableTokens(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (areDialectEquivalent(a, b)) return 0.94;
+
+  const minLength = Math.min(a.length, b.length);
+  const maxLength = Math.max(a.length, b.length);
+  if (minLength >= 4 && (a.includes(b) || b.includes(a))) {
+    return 0.88;
+  }
+  if (minLength <= 2) {
+    return 0;
+  }
+
+  const distance = levenshteinDistance(a, b);
+  const similarity = 1 - distance / maxLength;
+  if (maxLength >= 7 && distance <= 2) {
+    return Math.max(similarity, 0.76);
+  }
+  if (maxLength >= 5 && distance <= 2 && similarity >= 0.66) {
+    return similarity;
+  }
+  if (maxLength >= 3 && distance <= 1) {
+    return similarity;
+  }
+
+  return 0;
+}
+
+function scoreTokenVariantSets(scriptVariants: string[], whisperVariants: string[]): number {
+  let best = 0;
+  for (const scriptVariant of scriptVariants) {
+    for (const whisperVariant of whisperVariants) {
+      best = Math.max(best, scoreComparableTokens(scriptVariant, whisperVariant));
+    }
+  }
+  return best;
+}
+
+function requiredMatchScore(variants: string[]): number {
+  const maxLength = variants.reduce((max, variant) => Math.max(max, variant.length), 0);
+  if (maxLength <= 2) return 0.94;
+  if (maxLength <= 4) return 0.72;
+  return 0.6;
+}
+
+function findWhisperMatchIndex(
+  cleanWhisper: Array<WhisperWord & { norms: string[] }>,
+  startIndex: number,
+  scriptToken: string
+): number | null {
+  const scriptVariants = makeComparableTokenVariants(scriptToken);
+  if (scriptVariants.length === 0) {
+    return null;
+  }
+
+  const threshold = requiredMatchScore(scriptVariants);
+  const maxLookAhead = 8;
+  let best: { index: number; score: number; adjustedScore: number } | null = null;
+
+  for (
+    let index = startIndex;
+    index < Math.min(startIndex + maxLookAhead, cleanWhisper.length);
+    index++
+  ) {
+    const score = scoreTokenVariantSets(scriptVariants, cleanWhisper[index].norms);
+    if (score <= 0) {
+      continue;
+    }
+
+    const adjustedScore = score - (index - startIndex) * 0.012;
+    if (!best || adjustedScore > best.adjustedScore) {
+      best = { index, score, adjustedScore };
+    }
+  }
+
+  return best && best.score >= threshold ? best.index : null;
+}
+
+function clampTiming(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function interpolateTokenTimings(
+  tokens: DisplayToken[],
+  startIndex: number,
+  endIndexExclusive: number,
+  startTime: number,
+  endTime: number
+): void {
+  const count = endIndexExclusive - startIndex;
+  if (count <= 0) {
+    return;
+  }
+
+  const weights = tokens
+    .slice(startIndex, endIndexExclusive)
+    .map((token) => Math.max(1, makeComparableTokenVariants(token.text)[0]?.length || token.text.length));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0) || count;
+  const boundedEnd = Math.max(startTime, endTime);
+  const duration = boundedEnd - startTime;
+
+  let cursor = startTime;
+  for (let index = startIndex; index < endIndexExclusive; index++) {
+    const isLast = index === endIndexExclusive - 1;
+    const sliceDuration = isLast ? boundedEnd - cursor : (duration * weights[index - startIndex]) / totalWeight;
+    const tokenEnd = isLast ? boundedEnd : Math.min(boundedEnd, cursor + Math.max(0, sliceDuration));
+    tokens[index].startTime = cursor;
+    tokens[index].endTime = Math.max(cursor, tokenEnd);
+    cursor = tokens[index].endTime;
+  }
+}
 
 // Given a script (original spelling) and Whisper-transcribed words (possibly
 // wrong text on dialects), return tokens that keep script spelling but use
-// Whisper timings. Unmatched tail tokens get a proportional slice of remaining
-// segment time.
+// Whisper timings. Unmatched tokens get interpolated timing between nearby
+// matched anchors or segment bounds.
 function matchScriptToWhisperWords(
   scriptText: string,
   whisperWords: WhisperWord[],
@@ -862,41 +1211,34 @@ function matchScriptToWhisperWords(
     return { tokens: [], matched: 0, unmatched: 0 };
   }
   const cleanWhisper = whisperWords
-    .map((w) => ({ ...w, norm: normalizeComparableToken(w.text) }))
-    .filter((w) => w.norm.length > 0);
+    .map((w) => ({ ...w, norms: makeComparableTokenVariants(w.text) }))
+    .filter((w) => w.norms.length > 0);
 
   const tokens: DisplayToken[] = [];
   let wIdx = 0;
   let matched = 0;
   for (let i = 0; i < rawTokens.length; i++) {
     const scriptToken = rawTokens[i];
-    const scriptNorm = normalizeComparableToken(scriptToken);
-    if (!scriptNorm) continue;
-    let hit: (typeof cleanWhisper)[0] | null = null;
-    for (let j = wIdx; j < Math.min(wIdx + 3, cleanWhisper.length); j++) {
-      const w = cleanWhisper[j];
-      if (
-        scriptNorm === w.norm ||
-        scriptNorm.includes(w.norm) ||
-        w.norm.includes(scriptNorm)
-      ) {
-        hit = w;
-        wIdx = j + 1;
-        break;
-      }
-    }
-    if (hit) {
+    const scriptVariants = makeComparableTokenVariants(scriptToken);
+    if (scriptVariants.length === 0) continue;
+
+    const hitIndex = findWhisperMatchIndex(cleanWhisper, wIdx, scriptToken);
+    const hit = hitIndex === null ? null : cleanWhisper[hitIndex];
+    if (hit && hitIndex !== null) {
+      const absoluteStart = clampTiming(segmentStartTime + hit.start, segmentStartTime, segmentEndTime);
+      const absoluteEnd = clampTiming(segmentStartTime + hit.end, absoluteStart, segmentEndTime);
       tokens.push({
-        id: idOffset + i,
+        id: idOffset + tokens.length,
         segmentIndex,
         text: scriptToken,
-        startTime: segmentStartTime + hit.start,
-        endTime: segmentStartTime + hit.end,
+        startTime: absoluteStart,
+        endTime: Math.max(absoluteStart, absoluteEnd),
       });
+      wIdx = hitIndex + 1;
       matched++;
     } else {
       tokens.push({
-        id: idOffset + i,
+        id: idOffset + tokens.length,
         segmentIndex,
         text: scriptToken,
         startTime: Number.NaN,
@@ -905,8 +1247,6 @@ function matchScriptToWhisperWords(
     }
   }
 
-  // Fill NaN timings: interpolate between last matched time before and next
-  // matched time after (or segment bounds). Ensures every script token shows.
   let lastGood = segmentStartTime;
   for (let i = 0; i < tokens.length; i++) {
     if (Number.isFinite(tokens[i].startTime)) {
@@ -921,13 +1261,7 @@ function matchScriptToWhisperWords(
       nextIdx < tokens.length && Number.isFinite(tokens[nextIdx].startTime)
         ? tokens[nextIdx].startTime
         : segmentEndTime;
-    const gap = Math.max(0.05, nextTime - lastGood);
-    const span = nextIdx - i;
-    const per = gap / span;
-    for (let k = i; k < nextIdx; k++) {
-      tokens[k].startTime = lastGood + per * (k - i);
-      tokens[k].endTime = lastGood + per * (k - i + 1);
-    }
+    interpolateTokenTimings(tokens, i, nextIdx, lastGood, nextTime);
     i = nextIdx - 1;
     lastGood = nextTime;
   }
@@ -941,7 +1275,8 @@ async function synthesizeSegmentsWithGemini(
   segments: Segment[],
   apiKey: string,
   geminiStyle: 'plain' | 'expressive-lite',
-  geminiTempo: 'normal' | 'fast'
+  geminiTempo: 'normal' | 'fast',
+  femaleVoice: string
 ): Promise<GeminiSynthesisResult> {
   const audioDir = path.join(jobDir, 'gemini-audio');
   await fs.mkdir(audioDir, { recursive: true });
@@ -979,6 +1314,12 @@ async function synthesizeSegmentsWithGemini(
     const audioFile = `segment_${String(i + 1).padStart(4, '0')}.${extension}`;
     const audioPath = path.join(audioDir, audioFile);
     await fs.writeFile(audioPath, audioBuffer);
+    if (
+      result.value.mimeType === 'audio/wav' &&
+      shouldSpeedUpGeminiFemaleSegment(segment.speaker, femaleVoice)
+    ) {
+      await speedUpAudioFile(audioPath, GEMINI_FEMALE_AUDIO_TEMPO);
+    }
 
     const durationSeconds = await probeDurationSeconds(audioPath);
     synthesizedSegments.push({
@@ -1009,7 +1350,7 @@ async function synthesizeSegmentsWithGemini(
     elapsed_ms: Date.now() - startedAt,
     model: lastModel,
     caption_warning:
-      'Gemini captions use estimated word timing derived from segment duration (no Whisper alignment).',
+      'Gemini captions use Whisper word timing reconciliation when captions are burned; displayed text remains the cleaned script text.',
   };
 }
 
@@ -1103,6 +1444,105 @@ async function transcribeSegmentWords(
   return Array.isArray(data.words) ? data.words : [];
 }
 
+function inferAudioContentType(audioPath: string, contentType?: string | null): string {
+  const normalizedContentType = String(contentType || '').trim().toLowerCase();
+  if (normalizedContentType.startsWith('audio/')) {
+    return normalizedContentType;
+  }
+
+  const extension = path.extname(audioPath).toLowerCase();
+  if (extension === '.wav') return 'audio/wav';
+  if (extension === '.mp3') return 'audio/mpeg';
+  if (extension === '.m4a') return 'audio/mp4';
+  if (extension === '.webm') return 'audio/webm';
+  return 'application/octet-stream';
+}
+
+function buildWhisperUploadFilename(audioPath: string, contentType?: string | null): string {
+  const parsed = path.parse(audioPath);
+  if (parsed.ext && parsed.ext.toLowerCase() !== '.bin') {
+    return path.basename(audioPath);
+  }
+
+  const inferredContentType = inferAudioContentType(audioPath, contentType);
+  if (inferredContentType.includes('wav')) return `${parsed.name}.wav`;
+  if (inferredContentType.includes('mpeg') || inferredContentType.includes('mp3')) {
+    return `${parsed.name}.mp3`;
+  }
+  if (inferredContentType.includes('mp4') || inferredContentType.includes('m4a')) {
+    return `${parsed.name}.m4a`;
+  }
+  if (inferredContentType.includes('webm')) return `${parsed.name}.webm`;
+  return path.basename(audioPath);
+}
+
+function normalizeWhisperWords(data: unknown): WhisperWord[] {
+  if (!isPlainObject(data) || !Array.isArray(data.words)) {
+    return [];
+  }
+
+  const words: WhisperWord[] = [];
+  for (const item of data.words) {
+    if (!isPlainObject(item)) {
+      continue;
+    }
+
+    const text = String(item.word || item.text || '').trim();
+    const start = Number(item.start);
+    const end = Number(item.end);
+    if (!text || !Number.isFinite(start) || !Number.isFinite(end)) {
+      continue;
+    }
+
+    const safeStart = Math.max(0, start);
+    words.push({
+      text,
+      start: safeStart,
+      end: Math.max(safeStart, end),
+    });
+  }
+
+  return words;
+}
+
+async function transcribeAudioFileWords(
+  audioPath: string,
+  language = 'pl',
+  apiKey: string,
+  contentType?: string | null
+): Promise<WhisperWord[]> {
+  const audioBuffer = await fs.readFile(audioPath);
+  const form = new UndiciFormData();
+  form.append(
+    'file',
+    new Blob([new Uint8Array(audioBuffer)], {
+      type: inferAudioContentType(audioPath, contentType),
+    }),
+    buildWhisperUploadFilename(audioPath, contentType)
+  );
+  form.append('model', process.env.OPENAI_WHISPER_MODEL || 'whisper-1');
+  form.append('response_format', 'verbose_json');
+  form.append('timestamp_granularities[]', 'word');
+  if (language.trim()) {
+    form.append('language', language.trim());
+  }
+
+  const res = await undiciFetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: form,
+    signal: AbortSignal.timeout(OPENAI_WHISPER_TIMEOUT_MS),
+  });
+
+  if (!res.ok) {
+    throw new Error(`OpenAI whisper ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  }
+
+  return normalizeWhisperWords(await res.json());
+}
+
 // Highlight: at each active word, show up to `visibleWords` recent words;
 // paint the current word in wordColor, others in lineColor. Each visible
 // word is rendered on its own ASS row so long words do not crowd one line.
@@ -1142,72 +1582,129 @@ const COVER_OVERLAY_W = 1080;
 const COVER_OVERLAY_H = 940;
 const CAPTION_START_DELAY_SECONDS = 0.12;
 
-function wrapTitleText(raw: string, maxCharsPerLine: number): string {
-  const input = raw.replace(/\r\n?/g, '\n');
-  const outLines: string[] = [];
-  for (const paragraph of input.split('\n')) {
-    const words = paragraph.trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0) {
-      outLines.push('');
-      continue;
-    }
-    let current = '';
-    for (const word of words) {
-      if (!current) {
-        current = word;
-        continue;
-      }
-      if ((current + ' ' + word).length <= maxCharsPerLine) {
-        current += ' ' + word;
-      } else {
-        outLines.push(current);
-        current = word;
-      }
-    }
-    if (current) outLines.push(current);
-  }
-  return outLines.join('\n');
+function formatFirstFrameTitle(raw: string): string {
+  const words = raw
+    .replace(/\r\n?/g, '\n')
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter(Boolean);
+  return words.length > 0 ? words.join('\n') : raw.trim();
 }
 
-async function generateTitleOverlayPng(titleText: string, outputPng: string): Promise<void> {
+function resolveFirstFrameTitleFontSize(titleText: string, style: FirstFrameStyle): number {
+  const lines = titleText.split('\n').filter((line) => line.trim());
+  const lineCount = Math.max(1, lines.length);
+  const longestLine = lines.reduce((max, line) => Math.max(max, line.length), 0);
+  const requestedSize = Math.round(style.titleSize * FIRST_FRAME_PREVIEW_SCALE);
+  const renderMarginX = Math.round(style.titleMarginX * FIRST_FRAME_PREVIEW_SCALE);
+  const availableWidth = 1080 - renderMarginX * 2 - 20;
+  const availableHeight = COVER_OVERLAY_H - 48;
+  let nextSize = Math.max(58, requestedSize);
+  while (
+    nextSize > 58 &&
+    (longestLine * nextSize * 0.62 * FIRST_FRAME_TITLE_SCALE_X > availableWidth ||
+      lineCount * nextSize * 1.24 > availableHeight)
+  ) {
+    nextSize -= 1;
+  }
+  return nextSize;
+}
+
+function formatImageMagickGeometryOffset(x: number, y: number): string {
+  const formatPart = (value: number) => {
+    const rounded = Math.round(value);
+    return rounded < 0 ? String(rounded) : `+${rounded}`;
+  };
+  return `${formatPart(x)}${formatPart(y)}`;
+}
+
+async function generateTitleOverlayPng(
+  titleText: string,
+  outputPng: string,
+  style: FirstFrameStyle
+): Promise<void> {
   // Use ImageMagick to render each line centered with stroke — ffmpeg drawtext
   // cannot center individual lines of a multiline block in v5.1.
-  const FONT = '/usr/share/fonts/truetype/open-sans/OpenSans-ExtraBold.ttf';
-  const FONT_SIZE = 110;
-  const STROKE_WIDTH = 6;
+  const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+  const FONT_SIZE = resolveFirstFrameTitleFontSize(titleText, style);
+  const STROKE_WIDTH = 12;
+  const SHADOW_OFFSET_X = 10;
+  const SHADOW_OFFSET_Y = 10;
   const IMG_W = 1080;
   const IMG_H = 1920;
-  const CENTER_Y = 890; // vertical center of the face overlay zone
+  const CENTER_Y = 890 + Math.round(style.titleOffsetY * FIRST_FRAME_PREVIEW_SCALE);
   const offset = CENTER_Y - IMG_H / 2; // relative to ImageMagick gravity Center
+  const titleLayerPng = outputPng.replace(/\.png$/i, '_title.png');
+  const stretchedTitleLayerPng = outputPng.replace(/\.png$/i, '_title_wide.png');
+  const stretchedWidth = Math.round(IMG_W * FIRST_FRAME_TITLE_SCALE_X);
+  const stretchedX = -Math.round((stretchedWidth - IMG_W) / 2);
 
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn('convert', [
+  const runConvert = (args: string[]) =>
+    new Promise<void>((resolve, reject) => {
+      const proc = spawn('convert', args);
+      let stderr = '';
+      proc.stderr.on('data', (c) => (stderr += c.toString()));
+      proc.on('error', reject);
+      proc.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`ImageMagick title overlay exit ${code}: ${stderr.slice(-400)}`));
+      });
+    });
+
+  try {
+    await runConvert([
+      '-size', `${IMG_W}x${IMG_H}`,
+      'xc:none',
+      '-fill', 'rgba(0,0,0,0.26)',
+      '-draw', `rectangle 0,${COVER_OVERLAY_Y} ${IMG_W},${COVER_OVERLAY_Y + COVER_OVERLAY_H}`,
+      outputPng,
+    ]);
+
+    await runConvert([
       '-size', `${IMG_W}x${IMG_H}`,
       'xc:none',
       '-font', FONT,
       '-pointsize', String(FONT_SIZE),
-      '-fill', '#00FF04',
-      '-stroke', 'black',
+      '-fill', style.titleOutlineColor,
+      '-stroke', style.titleOutlineColor,
       '-strokewidth', String(STROKE_WIDTH),
       '-gravity', 'Center',
-      '-annotate', `+0+${offset}`,
+      '-annotate', formatImageMagickGeometryOffset(SHADOW_OFFSET_X, offset + SHADOW_OFFSET_Y),
       titleText,
+      '-annotate', formatImageMagickGeometryOffset(0, offset),
+      titleText,
+      '-stroke', 'none',
+      '-strokewidth', '0',
+      '-fill', style.titleColor,
+      '-annotate', formatImageMagickGeometryOffset(0, offset),
+      titleText,
+      titleLayerPng,
+    ]);
+
+    await runConvert([
+      titleLayerPng,
+      '-resize', `${stretchedWidth}x${IMG_H}!`,
+      stretchedTitleLayerPng,
+    ]);
+
+    await runConvert([
+      outputPng,
+      stretchedTitleLayerPng,
+      '-geometry', `${stretchedX}+0`,
+      '-composite',
       outputPng,
     ]);
-    let stderr = '';
-    proc.stderr.on('data', (c) => (stderr += c.toString()));
-    proc.on('error', reject);
-    proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ImageMagick title overlay exit ${code}: ${stderr.slice(-400)}`));
-    });
-  });
+  } finally {
+    await fs.unlink(titleLayerPng).catch(() => {});
+    await fs.unlink(stretchedTitleLayerPng).catch(() => {});
+  }
 }
 
 async function compositeOnCover(
   concatMp4: string,
   outputMp4: string,
-  titleTextFile: string | null
+  titleTextFile: string | null,
+  firstFrameStyle: FirstFrameStyle
 ): Promise<{ elapsed_ms: number }> {
   const start = Date.now();
 
@@ -1216,12 +1713,11 @@ async function compositeOnCover(
   if (titleTextFile) {
     const rawTitle = await fs.readFile(titleTextFile, 'utf8');
     titleOverlayPng = titleTextFile.replace('.txt', '_overlay.png');
-    await generateTitleOverlayPng(rawTitle, titleOverlayPng);
+    await generateTitleOverlayPng(rawTitle, titleOverlayPng, firstFrameStyle);
   }
 
   // Shine: periodic left→right light sweep over "Ai podcast" logo (top COVER_OVERLAY_Y px), every 15 s
   // floor-based modulo avoids fmod() which is unavailable in ffmpeg 5.1 geq expressions
-  const tMod = 'T-floor(T/15.0)*15.0';
   const shineSrc = `color=white:s=${COVER_OVERLAY_W}x${COVER_OVERLAY_Y}:r=30,format=rgba,geq=r=255:g=255:b=255:a=180*exp(-(((X/W-(T-floor(T/15.0)*15.0)/1.2)*(X/W-(T-floor(T/15.0)*15.0)/1.2))*40))*(1/(1+exp(1000*((T-floor(T/15.0)*15.0)-1.2))))`;
 
   const baseFilter = `[0:v]scale=${COVER_OVERLAY_W}:${COVER_OVERLAY_W}:flags=lanczos,crop=${COVER_OVERLAY_W}:${COVER_OVERLAY_H}:0:${(COVER_OVERLAY_W - COVER_OVERLAY_H) / 2}[fg];[1:v][fg]overlay=0:${COVER_OVERLAY_Y}[bg]`;
@@ -1319,6 +1815,38 @@ async function probeDurationSeconds(filePath: string): Promise<number> {
       resolve(d);
     });
   });
+}
+
+async function speedUpAudioFile(filePath: string, tempo: number): Promise<void> {
+  if (tempo <= 1) {
+    return;
+  }
+
+  const tmpPath = `${filePath}.tempo-${process.pid}-${Date.now()}.wav`;
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-y',
+      '-i',
+      filePath,
+      '-filter:a',
+      `atempo=${tempo.toFixed(3)}`,
+      tmpPath,
+    ]);
+    let stderr = '';
+    proc.stderr.on('data', (c) => (stderr += c.toString()));
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg atempo exit ${code}: ${stderr.slice(-600)}`));
+    });
+  });
+  await fs.rename(tmpPath, filePath);
+}
+
+function shouldSpeedUpGeminiFemaleSegment(speaker: string, femaleVoice: string): boolean {
+  const normalizedSpeaker = speaker.trim().toLowerCase();
+  const normalizedFemaleVoice = femaleVoice.trim().toLowerCase();
+  return normalizedSpeaker === normalizedFemaleVoice || normalizedSpeaker === 'kore';
 }
 
 async function concatSegmentsToMp4(
@@ -1580,8 +2108,13 @@ async function preparePipelineInput(config: Pick<
     });
   }
 
+  const allowedInlineTags =
+    config.ttsEngine === 'gemini' && config.geminiStyle === 'expressive-lite'
+      ? GEMINI_EXPRESSIVE_ALLOWED_INLINE_TAGS
+      : undefined;
+
   segments = segments
-    .map((segment) => ({ ...segment, text: stripTtsInlineTags(segment.text) }))
+    .map((segment) => ({ ...segment, text: stripTtsInlineTags(segment.text, allowedInlineTags) }))
     .filter((segment) => segment.text.length > 0);
 
   if (segments.length === 0) {
@@ -1700,7 +2233,8 @@ async function runBackgroundPipeline(
       segments,
       geminiApiKey,
       config.geminiStyle,
-      config.geminiTempo
+      config.geminiTempo,
+      femaleVoice
     );
   } else if (config.ttsEngine === 'elevenlabs') {
     const elevenlabsApiKey = resolvePodcastFilmElevenLabsApiKey(config.elevenlabsApiKey);
@@ -1818,7 +2352,7 @@ async function runBackgroundPipeline(
       mp4_url: buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'segment', mp4Name),
       duration_seconds: seg.duration_seconds,
       actual_duration_seconds: actualDuration,
-      text: segments[i].text,
+      text: stripCaptionInlineTags(segments[i].text),
       soulx_elapsed_ms: soulxElapsed,
     });
     await setPhase(jobId, 'soulx_talkhead', `Rendering avatar ${i + 1}/${totalSegs}…`, {
@@ -1843,15 +2377,17 @@ async function runBackgroundPipeline(
   let titleTextFile: string | null = null;
   if (config.title) {
     titleTextFile = path.join(paths.dir, 'title.txt');
-    await fs.writeFile(titleTextFile, wrapTitleText(config.title.toUpperCase(), 12), 'utf8');
+    await fs.writeFile(titleTextFile, formatFirstFrameTitle(config.title.toUpperCase()), 'utf8');
   }
-  await compositeOnCover(concatMp4Path, compositeMp4Path, titleTextFile);
+  await compositeOnCover(concatMp4Path, compositeMp4Path, titleTextFile, config.firstFrameStyle);
   const compositeElapsedMs = Date.now() - compositeStart;
   await fs.rename(compositeMp4Path, finalMp4Path);
 
   const directClassicAlignmentMode = resolveDirectClassicAlignmentMode(config.ttsEngine);
+  const useWhisperReconciliation =
+    config.ttsEngine === 'omnivoice' || config.ttsEngine === 'gemini';
   const useDirectClassicBaseline =
-    config.ttsEngine !== 'omnivoice' &&
+    !useWhisperReconciliation &&
     config.captionStyle === 'classic' &&
     directClassicAlignmentMode === 'segment_cues';
   const segmentCaptionTimings = buildSegmentCaptionTimings(
@@ -1873,20 +2409,27 @@ async function runBackgroundPipeline(
   const captionAlignmentMode =
     config.captionsMode !== 'burn' || config.captionStyle === 'off'
       ? 'disabled'
-      : config.ttsEngine === 'omnivoice'
+      : useWhisperReconciliation
         ? 'whisper_reconciled'
         : config.captionStyle === 'classic'
           ? directClassicAlignmentMode
           : 'word_estimated';
   if (config.captionsMode === 'burn' && config.captionStyle !== 'off') {
     const alignmentPhaseLabel =
-      config.ttsEngine === 'omnivoice'
+      useWhisperReconciliation
         ? 'Aligning word timing'
         : config.captionStyle === 'classic'
           ? useDirectClassicBaseline
             ? 'Building segment cue timing'
             : 'Estimating pseudo-token timing'
           : 'Estimating word timing';
+    const whisperApiKey =
+      config.ttsEngine === 'gemini' ? resolvePodcastFilmWhisperApiKey() : null;
+    if (config.ttsEngine === 'gemini' && !whisperApiKey) {
+      captionWarnings.push(
+        'OpenAI Whisper API key is missing; Gemini caption timings will be interpolated from segment duration.'
+      );
+    }
     await setPhase(
       jobId,
       'whisper_align',
@@ -1904,33 +2447,37 @@ async function runBackgroundPipeline(
       const segStart = cumulativeOffset;
       const segEnd = cumulativeOffset + segDuration;
 
-      if (config.ttsEngine !== 'omnivoice') {
-        if (!useDirectClassicBaseline) {
-          const tokens = estimateSegmentWordTimings(
-            segment.text,
-            segStart,
-            segEnd,
-            i,
-            idCursor
-          );
-          matchedTotal += tokens.length;
-          idCursor += tokens.length;
-          globalTokens.push(...tokens);
-        }
-      } else {
-        const manifestSeg = workerData!.manifest.segments[i];
+      if (useWhisperReconciliation) {
         let whisperWords: WhisperWord[] = [];
-        try {
-          whisperWords = await transcribeSegmentWords(
-            workerData!.job_id,
-            manifestSeg.audio_file,
-            config.captionLanguage
-          );
-        } catch (error) {
-          captionWarnings.push(
-            `transcribe-words failed for ${manifestSeg.audio_file}: ${describeError(error).slice(0, 160)}`
-          );
+        if (config.ttsEngine === 'omnivoice') {
+          const manifestSeg = workerData!.manifest.segments[i];
+          try {
+            whisperWords = await transcribeSegmentWords(
+              workerData!.job_id,
+              manifestSeg.audio_file,
+              config.captionLanguage
+            );
+          } catch (error) {
+            captionWarnings.push(
+              `transcribe-words failed for ${manifestSeg.audio_file}: ${describeError(error).slice(0, 160)}`
+            );
+          }
+        } else if (config.ttsEngine === 'gemini' && whisperApiKey) {
+          const manifestSeg = manifestSegments[i] as GeminiAudioSegment;
+          try {
+            whisperWords = await transcribeAudioFileWords(
+              manifestSeg.audio_path,
+              config.captionLanguage,
+              whisperApiKey,
+              manifestSeg.audio_content_type
+            );
+          } catch (error) {
+            captionWarnings.push(
+              `OpenAI whisper failed for ${manifestSeg.audio_file}: ${describeError(error).slice(0, 160)}`
+            );
+          }
         }
+
         const { tokens, matched, unmatched } = matchScriptToWhisperWords(
           segment.text,
           whisperWords,
@@ -1943,6 +2490,19 @@ async function runBackgroundPipeline(
         unmatchedTotal += unmatched;
         idCursor += tokens.length;
         globalTokens.push(...tokens);
+      } else if (config.ttsEngine !== 'omnivoice') {
+        if (!useDirectClassicBaseline) {
+          const tokens = estimateSegmentWordTimings(
+            segment.text,
+            segStart,
+            segEnd,
+            i,
+            idCursor
+          );
+          matchedTotal += tokens.length;
+          idCursor += tokens.length;
+          globalTokens.push(...tokens);
+        }
       }
 
       cumulativeOffset = segEnd;
@@ -1970,7 +2530,7 @@ async function runBackgroundPipeline(
       playResX: 1080,
       playResY: 1920,
       fontName: 'DejaVu Sans',
-      visibleWords: 2,
+      visibleWords: 1,
     };
     const classicCueGroups =
       config.captionStyle === 'classic'
@@ -1998,7 +2558,9 @@ async function runBackgroundPipeline(
   }
 
   const srtCueGroups =
-    config.ttsEngine !== 'omnivoice' && config.captionStyle === 'classic'
+    captionAlignmentMode === 'whisper_reconciled' && globalTokens.length > 0
+      ? buildClassicCueGroupsFromDisplayTokens(globalTokens, config.captionFontSize)
+      : config.ttsEngine !== 'omnivoice' && config.captionStyle === 'classic'
       ? directClassicAlignmentMode === 'classic_pseudo_token'
         ? globalTokens.length > 0
           ? buildClassicCueGroupsFromDisplayTokens(globalTokens, config.captionFontSize)
@@ -2012,11 +2574,51 @@ async function runBackgroundPipeline(
   const srtPath = getPodcastVideoJobPaths(jobId).srt;
   await fs.writeFile(srtPath, srtBody, 'utf8');
   const srtUrl = buildPodcastVideoFileUrl(publicBaseUrl, jobId, 'srt');
+  const captionTimingMode =
+    captionAlignmentMode === 'whisper_reconciled'
+      ? 'whisper'
+      : captionAlignmentMode === 'disabled'
+        ? 'disabled'
+        : 'estimated';
 
   const ttsTimingMs =
     config.ttsEngine === 'omnivoice'
       ? workerElapsedMs
       : directData!.elapsed_ms;
+  const metadataWrite = await writeSafeMp4GenerationMetadata(finalMp4Path, {
+    title: config.title || `Podcast film ${jobId}`,
+    comment: [
+      'ai_pipeline=podcast-film-v1',
+      `job_id=${jobId}`,
+      `tts_engine=${config.ttsEngine}`,
+      `soulx_model=${config.soulxModel}`,
+      `voice1=${resolvedVoice1}`,
+      `voice2=${resolvedVoice2}`,
+      `captions=${config.captionsMode}`,
+      `caption_style=${config.captionStyle}`,
+    ].join(';'),
+    ai_pipeline: 'podcast-film-v1',
+    ai_job_id: jobId,
+    ai_language: config.language,
+    ai_tts_engine: config.ttsEngine,
+    ai_tts_model: directData?.model,
+    ai_soulx_model: config.soulxModel,
+    ai_use_face_crop: config.useFaceCrop,
+    ai_requested_voice1: config.voice1,
+    ai_requested_voice2: config.voice2,
+    ai_voice1: resolvedVoice1,
+    ai_voice2: resolvedVoice2,
+    ai_male_voice: maleVoice,
+    ai_female_voice: femaleVoice,
+    ai_voices_swapped_for_gender: voicesSwapped,
+    ai_segments_count: segmentResults.length,
+    ai_captions: config.captionsMode,
+    ai_caption_style: config.captionStyle,
+    ai_caption_timing_mode: captionTimingMode,
+    ai_caption_alignment_mode: captionAlignmentMode,
+    ai_transition: config.transition,
+    ai_transition_duration: config.transitionDuration,
+  });
 
   await markDone(jobId, {
     success: true,
@@ -2046,7 +2648,7 @@ async function runBackgroundPipeline(
     caption_margin_v: config.captionMarginV,
     caption_word_color: config.captionWordColor,
     caption_line_color: config.captionLineColor,
-    caption_timing_mode: config.ttsEngine === 'omnivoice' ? 'whisper' : 'estimated',
+    caption_timing_mode: captionTimingMode,
     caption_alignment_mode: captionAlignmentMode,
     caption_warnings: captionWarnings,
     caption_matched_words: matchedTotal,
@@ -2065,6 +2667,12 @@ async function runBackgroundPipeline(
       concat_mode: concatResult.mode,
       composite_ms: compositeElapsedMs,
       captions_ms: captionsElapsedMs,
+      metadata_ms: metadataWrite.elapsed_ms,
+    },
+    mp4_metadata: {
+      embedded: true,
+      metadata_count: metadataWrite.metadata_count,
+      safe_fields_only: true,
     },
     worker: {
       omnivoice_url: config.ttsEngine === 'omnivoice' ? workerUrl : null,
@@ -2072,7 +2680,7 @@ async function runBackgroundPipeline(
     },
     note:
       config.ttsEngine === 'gemini'
-        ? `v1-gemini: per-segment Gemini WAV + SoulX render + ${captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
+        ? `v1-gemini: per-segment Gemini WAV + SoulX render + ${captionAlignmentMode === 'whisper_reconciled' ? 'Whisper timing reconciled onto cleaned original segment text.' : captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
         : config.ttsEngine === 'elevenlabs'
           ? `v1-elevenlabs: per-segment ElevenLabs MP3 + SoulX render + ${captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
           : 'v1: per-segment MP4 + concat + word-level ASS captions burned via Whisper timing reconciliation.',
@@ -2185,6 +2793,7 @@ export async function POST(request: NextRequest) {
       : 1390;
     const captionLanguage = String(body.caption_language ?? 'pl');
     const title = typeof body.title === 'string' ? body.title.trim() : '';
+    const firstFrameStyle = resolveFirstFrameStyle(body.cover_style ?? body.coverStyle);
 
     if (normalizedConversation.length === 0 && !transcript) {
       return NextResponse.json(
@@ -2259,6 +2868,7 @@ export async function POST(request: NextRequest) {
               use_face_crop: useFaceCrop,
               captions: captionsMode,
               caption_style: captionStyle,
+              cover_style: firstFrameStyle,
             },
           },
         },
@@ -2295,6 +2905,7 @@ export async function POST(request: NextRequest) {
       captionMarginV,
       captionLanguage,
       title,
+      firstFrameStyle,
     };
 
     if (ttsEngine === 'gemini' && !dryRun && !resolvePodcastFilmGeminiApiKey(geminiApiKey)) {
@@ -2341,6 +2952,7 @@ export async function POST(request: NextRequest) {
           male_voice: prepared.maleVoice,
           female_voice: prepared.femaleVoice,
           voices_swapped_for_gender: prepared.voicesSwapped,
+          first_frame_style: firstFrameStyle,
           segments_preview: prepared.segments.map((segment) => ({
             voice_id: segment.speaker,
             text: segment.text,

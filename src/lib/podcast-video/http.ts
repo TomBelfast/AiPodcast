@@ -19,6 +19,12 @@ export function resolvePublicBaseUrl(request: NextRequest): string {
     return envBase.replace(/\/+$/, '');
   }
 
+  return resolveRequestBaseUrl(request);
+}
+
+export function resolveRequestBaseUrl(
+  request: Pick<NextRequest, 'headers'>
+): string {
   const host =
     request.headers.get('x-forwarded-host') ||
     request.headers.get('host') ||

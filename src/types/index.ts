@@ -1,14 +1,50 @@
+import type {
+  AvatarProvider,
+  ConversationDraftItem,
+  GeminiStyle,
+  GeminiTempo,
+  ReviewMode,
+  TtsProvider,
+} from '@/lib/podcast/contracts';
+
 export interface DialogueInput {
   text: string;
   voiceId: string;
+  speaker?: string;
 }
 
 export interface CreateDialogueRequest {
   inputs: DialogueInput[];
+  conversation?: ConversationDraftItem[];
+  raw_text?: string;
+  language?: string;
   modelId?: string;
   seed?: number;
   apiKey?: string;
   includeTimestamps?: boolean;
+  provider?: TtsProvider;
+  ttsProvider?: TtsProvider;
+  ttsEngine?: string;
+  geminiApiKey?: string;
+  elevenlabsApiKey?: string;
+  geminiStyle?: GeminiStyle;
+  geminiTempo?: GeminiTempo;
+  tts?: {
+    provider?: TtsProvider;
+    voice1?: string;
+    voice2?: string;
+    model?: string;
+    geminiStyle?: GeminiStyle;
+    geminiTempo?: GeminiTempo;
+  };
+  avatar?: {
+    provider?: AvatarProvider;
+    model?: string;
+  };
+  review?: {
+    mode?: ReviewMode;
+  };
+  dryRun?: boolean;
 }
 
 export interface VoiceSegment {

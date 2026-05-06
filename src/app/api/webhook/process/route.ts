@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { streamObject } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
+import { createOpenAI, type OpenAIProviderSettings } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { getEffectiveAdminSettings } from '@/lib/admin-settings';
 
@@ -23,12 +23,20 @@ export async function POST(req: NextRequest) {
       transcript, 
       title, 
       language = 'en', 
-      metadata,
       mainPrompt,
       polishEndingPrompt,
       hostPersonalitiesPromptPolish,
       hostPersonalitiesPromptOther,
-    } = await req.json();
+    } = await req.json() as {
+      jobId?: string;
+      transcript?: string;
+      title?: string;
+      language?: string;
+      mainPrompt?: string;
+      polishEndingPrompt?: string;
+      hostPersonalitiesPromptPolish?: string;
+      hostPersonalitiesPromptOther?: string;
+    };
 
     if (!transcript || !jobId) {
       return NextResponse.json(
@@ -67,7 +75,7 @@ export async function POST(req: NextRequest) {
       openaiClient = createOpenAI({
         apiKey: openRouterApiKey,
         baseURL: 'https://openrouter.ai/api/v1',
-      } as any);
+      } satisfies OpenAIProviderSettings);
     } else {
       openaiClient = createOpenAI({
         apiKey: openaiApiKey,
@@ -187,10 +195,14 @@ Convert the following transcript into a natural podcast conversation between two
     let fullConversation: Array<{ speaker: string; text: string }> = [];
     for await (const chunk of result.partialObjectStream) {
       if (chunk.conversation && Array.isArray(chunk.conversation)) {
-        fullConversation = chunk.conversation.map((item: any) => ({
-          speaker: item.speaker || '',
-          text: item.text || ''
-        }));
+        fullConversation = chunk.conversation.flatMap((item) =>
+          item
+            ? [{
+                speaker: item.speaker || '',
+                text: item.text || '',
+              }]
+            : []
+        );
       }
     }
 
@@ -214,4 +226,3 @@ Convert the following transcript into a natural podcast conversation between two
     );
   }
 }
-

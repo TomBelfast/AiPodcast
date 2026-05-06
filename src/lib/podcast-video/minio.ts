@@ -51,9 +51,8 @@ export async function uploadBufferToMinio(
     throw new Error('MINIO_ACCESS_KEY or MINIO_SECRET_KEY is not configured.');
   }
 
-  const minioModule = await import('minio');
-  const MinIO = (minioModule as any).default || minioModule;
-  const client = new MinIO.Client({
+  const { Client } = await import('minio');
+  const client = new Client({
     endPoint: config.endPoint,
     port: config.port,
     useSSL: config.useSSL,
@@ -89,11 +88,19 @@ export async function uploadBufferToMinio(
 
   try {
     const policy = await client.getBucketPolicy(config.bucketName);
-    const parsed = JSON.parse(policy);
-    const isPublic = parsed.Statement?.some(
-      (statement: any) =>
-        statement.Effect === 'Allow' && statement.Principal?.AWS?.includes('*')
-    );
+    const parsed = JSON.parse(policy) as {
+      Statement?: Array<{
+        Effect?: string;
+        Principal?: { AWS?: string[] | string };
+      }>;
+    };
+    const isPublic = parsed.Statement?.some((statement) => {
+      const awsPrincipal = statement.Principal?.AWS;
+      const allowsEveryone = Array.isArray(awsPrincipal)
+        ? awsPrincipal.includes('*')
+        : awsPrincipal === '*';
+      return statement.Effect === 'Allow' && allowsEveryone;
+    });
 
     if (isPublic) {
       return buildDirectObjectUrl(config, objectName);

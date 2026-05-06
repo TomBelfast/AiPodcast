@@ -24,8 +24,9 @@ export async function POST(req: NextRequest) {
         // 3. Read keys from environment
         const openaiApiKey = process.env.OPENAI_API_KEY;
         const elevenlabsApiKey = process.env.ELEVENLABS_API_KEY;
+        const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 
-        if (!openaiApiKey && !elevenlabsApiKey) {
+        if (!openaiApiKey && !elevenlabsApiKey && !geminiApiKey) {
             return NextResponse.json({ error: "No system keys found in environment" }, { status: 404 });
         }
 
@@ -37,11 +38,12 @@ export async function POST(req: NextRequest) {
             .maybeSingle();
 
         const settingsToSave = {
+            ...(currentSettings || {}),
             user_id: user.id,
             openai_api_key: openaiApiKey,
             elevenlabs_api_key: elevenlabsApiKey,
+            gemini_api_key: geminiApiKey,
             updated_at: new Date().toISOString(),
-            ...(currentSettings || {}) // Include existing prompts if they exist
         };
 
         // 5. Upsert into database
@@ -63,7 +65,8 @@ export async function POST(req: NextRequest) {
             message: "Keys and settings synced from matrix core to local storage successfully.",
             syncedKeys: {
                 openai: !!openaiApiKey,
-                elevenlabs: !!elevenlabsApiKey
+                elevenlabs: !!elevenlabsApiKey,
+                gemini: !!geminiApiKey
             }
         });
 

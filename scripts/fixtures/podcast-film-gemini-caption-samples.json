@@ -1,0 +1,46 @@
+{
+  "samples": [
+    {
+      "id": "neutral",
+      "title": "Gemini Caption Experiment Neutral",
+      "conversation": [
+        { "speaker": "Antoni", "text": "Dobra, mamy dziś spokojniejszy temat. Firmy wdrażają AI, ale większość zysków widać dopiero wtedy, gdy proces jest naprawdę uporządkowany." },
+        { "speaker": "Zofia", "text": "No i to jest ta mniej seksowna część. Nie sam model robi robotę, tylko to, czy ktoś opisał kroki, wyjątki i odpowiedzialność." },
+        { "speaker": "Antoni", "text": "Jak zespół wrzuca wszystko do jednego worka, to AI tylko szybciej miesza bałagan. Efekt jest widowiskowy, ale niekoniecznie użyteczny." },
+        { "speaker": "Zofia", "text": "Za to przy powtarzalnych zadaniach działa bardzo dobrze: klasyfikacja maili, streszczenia spotkań, porządkowanie notatek po rozmowach z klientem." },
+        { "speaker": "Antoni", "text": "I ważne, że człowiek nadal pilnuje ostatniej decyzji, bo przecinek w złym miejscu czasem zmienia sens całej odpowiedzi." },
+        { "speaker": "Zofia", "text": "Zwłaszcza kiedy tempo rozmowy się zmienia, ktoś robi krótką pauzę, a potem nagle przyspiesza i sypie trzema zastrzeżeniami naraz." },
+        { "speaker": "Antoni", "text": "Dlatego ten test ma sens: chcemy zobaczyć, czy napisy nadal wchodzą na czas, nawet gdy mówca lekko przeciąga początek i ścina końcówkę." },
+        { "speaker": "Zofia", "text": "Jeśli to będzie stabilne wizualnie, to mamy mocny argument, żeby nie komplikować produktu bardziej niż trzeba." }
+      ]
+    },
+    {
+      "id": "fast",
+      "title": "Gemini Caption Experiment Fast",
+      "conversation": [
+        { "speaker": "Antoni", "text": "Dobra, lecimy szybko, bo rynek znowu przyspieszył. Wczoraj było demo, dziś jest pilot, jutro ktoś chce już pełny rollout." },
+        { "speaker": "Zofia", "text": "A po drodze nikt nie zadał pytania, kto będzie poprawiał błędy, gdy model pomyli klienta premium z leadem z formularza." },
+        { "speaker": "Antoni", "text": "No właśnie, i wtedy zaczyna się sprint w sprincie, bo trzeba poprawić CRM, prompt, routing i jeszcze tłumaczyć zarządowi, skąd ten poślizg." },
+        { "speaker": "Zofia", "text": "Najśmieszniejsze jest to, że sama technologia zwykle działa, tylko tempo decyzji jest nierówne: chwila ciszy, potem pięć zmian na raz." },
+        { "speaker": "Antoni", "text": "Jak napisy to wytrzymają, to znaczy, że cue start i cue end są ustawione sensownie, a nie na oko po całym segmencie." },
+        { "speaker": "Zofia", "text": "Bo widz od razu czuje, kiedy napis wpada za późno, wisi za długo albo wyskakuje przed głosem i robi z tego dziwną karaoke-race." },
+        { "speaker": "Antoni", "text": "Tu mamy krótkie zdania, dłuższe wyjaśnienie, przecinki i naturalne oddechy, czyli dokładnie to, co najczęściej psuje odbiór w praktyce." },
+        { "speaker": "Zofia", "text": "Jeżeli po takim tempie nadal da się to oglądać bez irytacji, to bardzo możliwe, że jesteśmy już wystarczająco blisko dobrego defaultu." }
+      ]
+    },
+    {
+      "id": "dialect",
+      "title": "Gemini Caption Experiment Dialect",
+      "conversation": [
+        { "speaker": "Antoni", "text": "Jo ci powiym prosto: jak firma goda, że mo AI, a dalej niy umiy porzondnie spisać procesu, to to je ino nowo farba na starym bajzlu." },
+        { "speaker": "Zofia", "text": "Eee, farba farbom, ale jak przyjdzie co do czego, to potem i tak ktoś siedzi po godzinach i ręcznie prostuje te wszystkie mądre automaty." },
+        { "speaker": "Antoni", "text": "No ba, bo narzynie może być lotne, ale jak ludzie godajom nierówno, raz wartko, raz z pauzą, to napis zaroz pokazuje, czy synchronizacja trzyma fason." },
+        { "speaker": "Zofia", "text": "A przy naszej gwarze to już w ogóle. Jak system se zacznie zgadywać tekst po swojemu, to zniknie klimat i zrobi się taka ugładzona papka." },
+        { "speaker": "Antoni", "text": "Skuli tego wolymy caption z oryginalnego tekstu, ino trza mu jeszcze dać taki timing, coby niy wyprzedzał głosu i niy zostowoł w tyle." },
+        { "speaker": "Zofia", "text": "I niech se będzie chwila ciszy po przecinku, niech końcówka nie urwie się za wcześnie, bo wtedy odbiorca od razu czuje, że coś tu nie styka." },
+        { "speaker": "Antoni", "text": "Jak ten wariant pseudo-tokenowy wyjdzie stabilnie nawet przy takiej fonetyce, to jo bym powiedział, że to już je konkret, a nie kolejny eksperyment do szuflady." },
+        { "speaker": "Zofia", "text": "No, ale jak się rozjedzie na gwarze, to trzeba będzie jeszcze docisnąć heurystykę, bo samym życzeniem produktu tego nie przeskoczysz." }
+      ]
+    }
+  ]
+}

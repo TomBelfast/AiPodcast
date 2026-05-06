@@ -7,6 +7,7 @@ import {
   getPodcastVideoJobAvailability,
   toClientPodcastVideoJob,
 } from '@/lib/podcast-video/jobs';
+import { listPersistedPodcastVideoJobs } from '@/lib/podcast-video/history';
 import { resolveCaptionSettings } from '@/lib/podcast-video/nca';
 import { runPodcastVideoJob } from '@/lib/podcast-video/orchestrator';
 import { resolvePublicBaseUrl, isPodcastVideoAuthorized } from '@/lib/podcast-video/http';
@@ -17,6 +18,20 @@ import {
   writeJsonFile,
 } from '@/lib/podcast-video/archive';
 import type { PodcastVideoJobRequest } from '@/lib/podcast-video/types';
+import { getEffectiveAdminSettings } from '@/lib/admin-settings';
+import {
+  normalizeAvatarProvider,
+  normalizeConversationDraft,
+  normalizeGeminiStyle,
+  normalizeGeminiTempo,
+  normalizeInputMode,
+  normalizeReviewMode,
+  normalizeTtsProvider,
+} from '@/lib/podcast/contracts';
+import { generateConversationDraft } from '@/lib/podcast/generate';
+
+const INTERNAL_GENERATE_PODCAST_TIMEOUT_MS = 8 * 60 * 1000;
+const INTERNAL_GENERATE_PODCAST_ATTEMPT_TIMEOUT_MS = 150 * 1000;
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,6 +41,16 @@ type SynchronousReturnType = 'job' | 'mp4_url' | 'mp4';
 
 function buildJobId(): string {
   return `podcast_video_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sanitizeTtsConfigForClient(tts: PodcastVideoJobRequest['tts'] | undefined) {
+  if (!tts) {
+    return undefined;
+  }
+
+  const sanitized = { ...tts };
+  delete sanitized.apiKey;
+  return sanitized;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -144,29 +169,7 @@ function normalizeConversationItems(input: unknown[] | null): PodcastVideoJobReq
     return undefined;
   }
 
-  const conversation = input
-    .map((item) => {
-      if (!isPlainObject(item)) {
-        return null;
-      }
-
-      const speaker =
-        normalizeString(item.speaker) ||
-        normalizeString(item.name) ||
-        normalizeString(item.role) ||
-        'Speaker1';
-      const text =
-        normalizeString(item.text) ||
-        normalizeString(item.content) ||
-        normalizeString(item.message);
-
-      if (!text) {
-        return null;
-      }
-
-      return { speaker, text };
-    })
-    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const conversation = normalizeConversationDraft(input);
 
   return conversation.length ? conversation : undefined;
 }
@@ -176,7 +179,7 @@ function normalizeTranscript(input: Record<string, unknown> | null): PodcastVide
     return undefined;
   }
 
-  return input as PodcastVideoJobRequest['transcript'];
+  return input as unknown as PodcastVideoJobRequest['transcript'];
 }
 
 function resolveSynchronousReturnType(value: string | null): SynchronousReturnType {
@@ -204,9 +207,23 @@ function buildScriptTextFromTopic(topic: string): string {
 
 function normalizeIncomingRequest(body: RawBody, request: NextRequest) {
   const candidates = collectCandidateObjects(body);
+  const ttsCandidates = [
+    ...candidates,
+    ...candidates
+      .map((candidate) => findNestedObject(candidate, 'tts'))
+      .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate)),
+  ];
+  const avatarCandidates = candidates
+    .map((candidate) => findNestedObject(candidate, 'avatar'))
+    .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+  const reviewCandidates = candidates
+    .map((candidate) => findNestedObject(candidate, 'review'))
+    .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate));
 
   const topic = pickString(candidates, ['topic', 'subject', 'theme']);
-  const directScriptText = pickString(candidates, [
+  const directRawText = pickString(candidates, [
+    'raw_text',
+    'rawText',
     'script_text',
     'scriptText',
     'transcript',
@@ -222,15 +239,63 @@ function normalizeIncomingRequest(body: RawBody, request: NextRequest) {
   const transcript = normalizeTranscript(
     pickObject(candidates, ['transcript', 'normalizedTranscript', 'normalized_transcript'])
   );
+  const rawText = directRawText || (topic ? buildScriptTextFromTopic(topic) : null);
+  const normalizedInputMode = normalizeInputMode(rawText, conversation || []);
+  const ttsProvider = normalizeTtsProvider(
+    pickString(ttsCandidates, ['provider', 'ttsProvider', 'tts_provider', 'ttsEngine', 'tts_engine']) ||
+      'elevenlabs'
+  );
+  const avatarProvider = normalizeAvatarProvider(
+    pickString(avatarCandidates, ['provider']) || 'soulx'
+  );
+  const reviewMode = normalizeReviewMode(
+    pickString(reviewCandidates, ['mode']) || pickString(candidates, ['review_mode', 'reviewMode'])
+  );
+  const geminiStyle = normalizeGeminiStyle(
+    pickString(ttsCandidates, ['geminiStyle', 'gemini_style']) ||
+      pickString(candidates, ['geminiStyle', 'gemini_style'])
+  );
+  const geminiTempo = normalizeGeminiTempo(
+    pickString(ttsCandidates, ['geminiTempo', 'gemini_tempo']) ||
+      pickString(candidates, ['geminiTempo', 'gemini_tempo'])
+  );
 
   const normalizedRequest: PodcastVideoJobRequest = {
     title: pickString(candidates, ['title', 'name']) || topic || 'Podcast Video',
     language: pickString(candidates, ['language', 'lang', 'locale']) || 'pl',
-    script_text: directScriptText || (topic ? buildScriptTextFromTopic(topic) : undefined),
+    raw_text: rawText || undefined,
+    script_text: rawText || undefined,
     conversation,
     transcript,
     voice1: pickString(candidates, ['voice1', 'voice_1', 'host1_voice', 'speaker1_voice']) || undefined,
     voice2: pickString(candidates, ['voice2', 'voice_2', 'host2_voice', 'speaker2_voice']) || undefined,
+    tts: {
+      provider: ttsProvider,
+      model: pickString(ttsCandidates, ['model']) || undefined,
+      voice1:
+        pickString(ttsCandidates, ['voice1', 'voice_1']) ||
+        pickString(candidates, ['voice1', 'voice_1', 'host1_voice', 'speaker1_voice']) ||
+        undefined,
+      voice2:
+        pickString(ttsCandidates, ['voice2', 'voice_2']) ||
+        pickString(candidates, ['voice2', 'voice_2', 'host2_voice', 'speaker2_voice']) ||
+        undefined,
+      geminiStyle,
+      geminiTempo,
+      apiKey:
+        pickString(ttsCandidates, ['apiKey', 'api_key', 'gemini_api_key', 'elevenlabs_api_key']) ||
+        undefined,
+    },
+    avatar: {
+      provider: avatarProvider,
+      model:
+        pickString(avatarCandidates, ['model']) ||
+        pickString(candidates, ['avatar_model', 'avatarModel']) ||
+        undefined,
+    },
+    review: {
+      mode: reviewMode,
+    },
     source_job_id:
       pickString(candidates, ['source_job_id', 'sourceJobId', 'job_id', 'jobId']) || undefined,
     exact_captions:
@@ -274,17 +339,13 @@ function normalizeIncomingRequest(body: RawBody, request: NextRequest) {
     requestKeys: Object.keys(findNestedObject(body, 'request') || {}),
     resolvedInputMode: normalizedRequest.transcript
       ? 'transcript'
-      : normalizedRequest.conversation?.length
-        ? 'conversation'
-        : normalizedRequest.script_text
-          ? 'script_text'
-          : 'unknown',
-    usedTopicFallback: Boolean(topic && !directScriptText),
+      : normalizedInputMode || 'unknown',
+    usedTopicFallback: Boolean(topic && !directRawText),
     topic,
     title: normalizedRequest.title,
     language: normalizedRequest.language,
-    hasScriptText: Boolean(normalizedRequest.script_text),
-    scriptTextLength: normalizedRequest.script_text?.length || 0,
+    hasRawText: Boolean(normalizedRequest.raw_text),
+    rawTextLength: normalizedRequest.raw_text?.length || 0,
     hasConversation: Boolean(normalizedRequest.conversation?.length),
     conversationCount: normalizedRequest.conversation?.length || 0,
     hasTranscript: Boolean(normalizedRequest.transcript),
@@ -294,6 +355,12 @@ function normalizeIncomingRequest(body: RawBody, request: NextRequest) {
     transcriptWords: Array.isArray(normalizedRequest.transcript?.words)
       ? normalizedRequest.transcript.words.length
       : 0,
+    ttsProvider,
+    geminiStyle,
+    geminiTempo,
+    avatarProvider,
+    reviewMode,
+    inputConflict: Boolean(rawText && normalizedRequest.conversation?.length),
     exactCaptions: normalizedRequest.exact_captions ?? true,
     style: normalizedRequest.style || null,
     dryRun,
@@ -324,6 +391,37 @@ function countConversationItems(request: PodcastVideoJobRequest): number {
   return 0;
 }
 
+export async function GET(request: NextRequest) {
+  try {
+    if (!isPodcastVideoAuthorized(request)) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const publicBaseUrl = resolvePublicBaseUrl(request);
+    const limitParam = Number(request.nextUrl.searchParams.get('limit') || '30');
+    const limit = Number.isFinite(limitParam)
+      ? Math.max(1, Math.min(Math.trunc(limitParam), 100))
+      : 30;
+
+    const jobs = await listPersistedPodcastVideoJobs(publicBaseUrl, limit);
+    return NextResponse.json(
+      {
+        success: true,
+        jobs,
+      },
+      {
+        headers: { 'Cache-Control': 'no-store' },
+      }
+    );
+  } catch (error) {
+    console.error('[podcast-video] failed to list archived jobs:', error);
+    return NextResponse.json(
+      { error: 'Failed to load podcast video history.' },
+      { status: 500 }
+    );
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     if (!isPodcastVideoAuthorized(request)) {
@@ -347,15 +445,25 @@ export async function POST(request: NextRequest) {
       waitTimeoutMs,
       returnType,
     } = normalizeIncomingRequest(rawBody, request);
-    const hasScriptText = Boolean(normalizedRequest.script_text?.trim());
+    const hasRawText = Boolean(normalizedRequest.raw_text?.trim());
     const hasConversation =
       Array.isArray(normalizedRequest.conversation) && normalizedRequest.conversation.length > 0;
     const hasTranscript = Boolean(normalizedRequest.transcript);
 
-    if (!hasScriptText && !hasConversation && !hasTranscript) {
+    if (!hasRawText && !hasConversation && !hasTranscript) {
       return NextResponse.json(
         {
-          error: 'Request must include script_text, conversation, or transcript.',
+          error:
+            'Request must include exactly one public input: raw_text or conversation. Legacy transcript remains internal-only.',
+        },
+        { status: 400 }
+      );
+    }
+
+    if (hasRawText && hasConversation) {
+      return NextResponse.json(
+        {
+          error: 'Provide exactly one public input: raw_text or conversation.',
         },
         { status: 400 }
       );
@@ -365,18 +473,99 @@ export async function POST(request: NextRequest) {
     const publicBaseUrl = resolvePublicBaseUrl(request);
     const title = normalizedRequest.title?.trim() || 'Podcast Video';
     const language = normalizedRequest.language?.trim() || 'pl';
+    const ttsProvider = normalizedRequest.tts?.provider || 'elevenlabs';
+
+    if (ttsProvider === 'omnivoice') {
+      return NextResponse.json(
+        {
+          error:
+            'tts.provider "omnivoice" is not supported in /api/podcast-video/jobs. Use /api/podcast-video/podcast-film/jobs.',
+        },
+        { status: 501 }
+      );
+    }
+
+    if (ttsProvider === 'gemini' && !dryRun) {
+      const adminSettings = getEffectiveAdminSettings();
+      const geminiApiKey =
+        normalizedRequest.tts?.apiKey?.trim() ||
+        String(adminSettings.gemini_api_key || '').trim();
+
+      if (!geminiApiKey) {
+        return NextResponse.json(
+          {
+            error: 'Gemini API key is not configured for podcast-video jobs.',
+            code: 'MISSING_GEMINI_KEY',
+          },
+          { status: 403 }
+        );
+      }
+
+      normalizedRequest.tts = {
+        ...normalizedRequest.tts,
+        provider: 'gemini',
+        apiKey: geminiApiKey,
+      };
+    }
 
     if (dryRun) {
+      const clientNormalizedRequest: PodcastVideoJobRequest = {
+        ...normalizedRequest,
+        ...(normalizedRequest.tts ? { tts: sanitizeTtsConfigForClient(normalizedRequest.tts) } : {}),
+      };
+
       return NextResponse.json(
         {
           success: true,
           dry_run: true,
           message:
             'Payload zostal poprawnie odebrany i znormalizowany. Render nie zostal uruchomiony.',
-          normalizedRequest,
+          normalizedRequest: clientNormalizedRequest,
           requestSummary,
           suggestedAsyncEndpoint: `${publicBaseUrl}/api/podcast-video/jobs`,
           suggestedSyncMp4UrlExample: `${publicBaseUrl}/api/podcast-video/jobs?wait=1&return=mp4_url`,
+        },
+        { status: 200 }
+      );
+    }
+
+    if (
+      normalizedRequest.review?.mode === 'pause_after_conversation' &&
+      hasRawText &&
+      !hasTranscript
+    ) {
+      const conversationDraft = await generateConversationDraft({
+        rawText: normalizedRequest.raw_text!,
+        title,
+        language,
+        ttsProvider: normalizedRequest.tts?.provider || 'elevenlabs',
+        timeoutMs: INTERNAL_GENERATE_PODCAST_TIMEOUT_MS,
+        llmAttemptTimeoutMs: INTERNAL_GENERATE_PODCAST_ATTEMPT_TIMEOUT_MS,
+      });
+
+      return NextResponse.json(
+        {
+          success: true,
+          review_required: true,
+          input_mode: 'raw_text',
+          review_mode: normalizedRequest.review.mode,
+          title,
+          language,
+          conversation: conversationDraft,
+          next_step: {
+            method: 'POST',
+            url: `${publicBaseUrl}/api/podcast-video/jobs`,
+            body: {
+              title,
+              language,
+              conversation: conversationDraft,
+              ...(normalizedRequest.tts
+                ? { tts: sanitizeTtsConfigForClient(normalizedRequest.tts) }
+                : {}),
+              avatar: normalizedRequest.avatar,
+              review: { mode: 'off' },
+            },
+          },
         },
         { status: 200 }
       );
@@ -398,7 +587,7 @@ export async function POST(request: NextRequest) {
       publicBaseUrl,
       captionSettings,
       inputSummary: {
-        hasScriptText,
+        hasScriptText: hasRawText,
         hasConversation,
         hasTranscript,
         conversationCount: countConversationItems(normalizedRequest),

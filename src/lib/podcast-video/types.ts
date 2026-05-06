@@ -1,4 +1,11 @@
 import type { NormalizedTranscript } from '@/lib/transcript-parser';
+import type {
+  AvatarProvider,
+  GeminiStyle,
+  GeminiTempo,
+  ReviewMode,
+  TtsProvider,
+} from '@/lib/podcast/contracts';
 
 export type PodcastVideoStatus = 'queued' | 'running' | 'success' | 'failed';
 
@@ -31,11 +38,28 @@ export interface PodcastVideoCaptionSettings {
 export interface PodcastVideoJobRequest {
   title?: string;
   language?: string;
+  raw_text?: string;
   script_text?: string;
   conversation?: PodcastConversationItem[];
   transcript?: NormalizedTranscript;
   voice1?: string;
   voice2?: string;
+  tts?: {
+    provider?: TtsProvider;
+    model?: string | null;
+    voice1?: string | null;
+    voice2?: string | null;
+    apiKey?: string | null;
+    geminiStyle?: GeminiStyle | null;
+    geminiTempo?: GeminiTempo | null;
+  };
+  avatar?: {
+    provider?: AvatarProvider;
+    model?: string | null;
+  };
+  review?: {
+    mode?: ReviewMode;
+  };
   source_job_id?: string;
   exact_captions?: boolean;
   style?: string;

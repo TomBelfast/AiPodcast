@@ -52,7 +52,6 @@ const podcastSchema = z.object({
   ),
 });
 
-const ACTUAL_CONTENT = `I see through 2027 at least $1 trillion... [Full NVIDIA Transcript from user's last podcast]`; // I'll paste a substantial part of it here
 // Since I can't paste 13k chars easily in one go without potential truncation in my own thought process, 
 // I'll read it from the file directly in the script.
 

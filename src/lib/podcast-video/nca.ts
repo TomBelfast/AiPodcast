@@ -120,8 +120,12 @@ function rewritePublicStorageUrl(url: string | null): string | null {
   return parsed.toString();
 }
 
-function extractResponseMessage(payload: any): string {
-  if (!payload) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function extractResponseMessage(payload: unknown): string {
+  if (!isRecord(payload)) {
     return '';
   }
 
@@ -129,15 +133,19 @@ function extractResponseMessage(payload: any): string {
     return payload.message;
   }
 
-  if (payload.message && typeof payload.message.error === 'string') {
+  if (isRecord(payload.message) && typeof payload.message.error === 'string') {
     return payload.message.error;
   }
 
   return '';
 }
 
-function extractFileUrl(payload: any): string | null {
-  const response = payload?.response;
+function extractFileUrl(payload: unknown): string | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  const response = payload.response;
   let extracted: string | null = null;
 
   if (typeof response === 'string' && response.startsWith('http')) {
@@ -146,17 +154,27 @@ function extractFileUrl(payload: any): string | null {
     const first = response[0];
     if (typeof first === 'string' && first.startsWith('http')) {
       extracted = first;
-    } else if (first && typeof first === 'object') {
-      extracted = first.file_url || first.url || null;
+    } else if (isRecord(first)) {
+      extracted =
+        typeof first.file_url === 'string'
+          ? first.file_url
+          : typeof first.url === 'string'
+            ? first.url
+            : null;
     }
-  } else if (response && typeof response === 'object') {
-    extracted = response.file_url || response.url || null;
+  } else if (isRecord(response)) {
+    extracted =
+      typeof response.file_url === 'string'
+        ? response.file_url
+        : typeof response.url === 'string'
+          ? response.url
+          : null;
   }
 
   return rewritePublicStorageUrl(extracted);
 }
 
-async function postJson(endpointPath: string, payload: unknown, timeoutMs: number): Promise<any> {
+async function postJson(endpointPath: string, payload: unknown, timeoutMs: number): Promise<unknown> {
   const baseUrl = getNcaBaseUrl();
   const apiKey = getNcaApiKey();
 
@@ -178,7 +196,7 @@ async function postJson(endpointPath: string, payload: unknown, timeoutMs: numbe
   });
 
   const rawText = await response.text();
-  let parsedBody: any = null;
+  let parsedBody: unknown = null;
   try {
     parsedBody = rawText ? JSON.parse(rawText) : null;
   } catch {

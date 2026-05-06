@@ -1,5 +1,9 @@
 import { promises as fs } from 'fs';
-import { getPodcastVideoJobPaths, ensurePodcastVideoArchiveDir } from './archive';
+import {
+  PODCAST_VIDEO_ARCHIVE_DIR,
+  getPodcastVideoJobPaths,
+  ensurePodcastVideoArchiveDir,
+} from './archive';
 
 export type JobPhaseId =
   | 'generate_podcast'
@@ -36,6 +40,26 @@ export interface JobStatus {
   result: unknown | null;
   error: { phase: JobPhaseId | null; code?: string; detail: string } | null;
 }
+
+const PROCESS_STARTED_AT_MS = Date.now() - Math.floor(process.uptime() * 1000);
+const INTERRUPTED_JOB_RECOVERY_GRACE_MS = 1500;
+const RECOVERY_SWEEP_MIN_INTERVAL_MS = 5000;
+const DEFAULT_RUNNING_JOB_STALE_TIMEOUT_MS = 30 * 60 * 1000;
+
+const RUNNING_JOB_STALE_TIMEOUT_MS: Record<JobPhaseId, number> = {
+  generate_podcast: 10 * 60 * 1000,
+  fetch_voices_images: 5 * 60 * 1000,
+  omnivoice_tts: 25 * 60 * 1000,
+  soulx_talkhead: 30 * 60 * 1000,
+  concat: 10 * 60 * 1000,
+  whisper_align: 15 * 60 * 1000,
+  burn_subs: 15 * 60 * 1000,
+};
+
+const globalForPodcastVideoRecovery = globalThis as typeof globalThis & {
+  __podcastVideoRecoveryPromise?: Promise<void>;
+  __podcastVideoRecoveryLastRunAt?: number;
+};
 
 async function atomicWrite(filePath: string, data: unknown): Promise<void> {
   const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
@@ -143,4 +167,136 @@ export async function markFailed(
     phase_progress: null,
     error: { phase, code, detail: detail.slice(0, 2000) },
   });
+}
+
+function getStatusActivityTimestampMs(status: JobStatus): number | null {
+  for (const value of [status.updated_at, status.started_at]) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function wasInterruptedByServiceRestart(status: JobStatus): boolean {
+  if (status.state !== 'running') {
+    return false;
+  }
+
+  const activityTimestampMs = getStatusActivityTimestampMs(status);
+  if (activityTimestampMs === null) {
+    return false;
+  }
+
+  return activityTimestampMs + INTERRUPTED_JOB_RECOVERY_GRACE_MS < PROCESS_STARTED_AT_MS;
+}
+
+function getRunningJobStaleTimeoutMs(status: JobStatus): number {
+  if (!status.phase) {
+    return DEFAULT_RUNNING_JOB_STALE_TIMEOUT_MS;
+  }
+
+  return RUNNING_JOB_STALE_TIMEOUT_MS[status.phase] ?? DEFAULT_RUNNING_JOB_STALE_TIMEOUT_MS;
+}
+
+function getRunningJobRecoveryFailure(
+  status: JobStatus,
+  nowMs: number
+): { code: 'service_restart' | 'stalled_job'; detail: string } | null {
+  if (status.state !== 'running') {
+    return null;
+  }
+
+  const activityTimestampMs = getStatusActivityTimestampMs(status);
+  if (activityTimestampMs === null) {
+    return null;
+  }
+
+  if (wasInterruptedByServiceRestart(status)) {
+    return {
+      code: 'service_restart',
+      detail: 'Job interrupted by aipodcast service restart.',
+    };
+  }
+
+  const staleTimeoutMs = getRunningJobStaleTimeoutMs(status);
+  if (activityTimestampMs + staleTimeoutMs < nowMs) {
+    const timeoutMinutes = Math.round(staleTimeoutMs / 60000);
+    return {
+      code: 'stalled_job',
+      detail: `Job stalled in ${status.phase ?? 'unknown'} with no status update for over ${timeoutMinutes} minutes.`,
+    };
+  }
+
+  return null;
+}
+
+async function recoverRunningJobs(): Promise<void> {
+  let entries;
+  try {
+    entries = await fs.readdir(PODCAST_VIDEO_ARCHIVE_DIR, {
+      withFileTypes: true,
+      encoding: 'utf8',
+    });
+  } catch {
+    return;
+  }
+
+  const nowMs = Date.now();
+  const recoveredJobs: string[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    const status = await readStatus(entry.name);
+    if (!status) {
+      continue;
+    }
+
+    const failure = getRunningJobRecoveryFailure(status, nowMs);
+    if (!failure) {
+      continue;
+    }
+
+    await markFailed(entry.name, failure.detail, status.phase, failure.code);
+    recoveredJobs.push(`${entry.name}:${failure.code}`);
+  }
+
+  if (recoveredJobs.length > 0) {
+    console.warn(
+      `[podcast-film] recovered ${recoveredJobs.length} stale/interrupted job(s): ${recoveredJobs.join(', ')}`
+    );
+  }
+}
+
+export async function ensureRunningJobRecovery(): Promise<void> {
+  const nowMs = Date.now();
+
+  if (globalForPodcastVideoRecovery.__podcastVideoRecoveryPromise) {
+    await globalForPodcastVideoRecovery.__podcastVideoRecoveryPromise;
+    return;
+  }
+
+  const lastRunAt = globalForPodcastVideoRecovery.__podcastVideoRecoveryLastRunAt ?? 0;
+  if (nowMs - lastRunAt < RECOVERY_SWEEP_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  globalForPodcastVideoRecovery.__podcastVideoRecoveryPromise = recoverRunningJobs()
+    .catch((error) => {
+      console.error('[podcast-film] running job recovery failed:', error);
+    })
+    .finally(() => {
+      globalForPodcastVideoRecovery.__podcastVideoRecoveryLastRunAt = Date.now();
+      globalForPodcastVideoRecovery.__podcastVideoRecoveryPromise = undefined;
+    });
+
+  await globalForPodcastVideoRecovery.__podcastVideoRecoveryPromise;
+}
+
+export async function ensureInterruptedJobRecovery(): Promise<void> {
+  await ensureRunningJobRecovery();
 }

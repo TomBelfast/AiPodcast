@@ -71,7 +71,7 @@ IMPORTANT: Make this a natural conversation of about 1.5-2.5 minutes. Aim for 18
     });
 
     let totalChars = 0;
-    object.conversation.forEach((item, i) => {
+    object.conversation.forEach((item) => {
       totalChars += item.text.length;
       console.log(`[${item.speaker}]: ${item.text}`);
     });

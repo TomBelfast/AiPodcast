@@ -10,6 +10,15 @@ interface InternalSegment {
   endTimeSeconds: number;
 }
 
+interface ExternalVoiceSegment {
+  voice_id?: string | null;
+  voiceId?: string | null;
+  start_time_seconds?: number | null;
+  startTimeSeconds?: number | null;
+  end_time_seconds?: number | null;
+  endTimeSeconds?: number | null;
+}
+
 function normalizeSpeakerKey(s: string) {
   return s.trim().toLowerCase();
 }
@@ -20,7 +29,7 @@ function normalizeSpeakerKey(s: string) {
  */
 export async function generateStems(
   inputAudioPath: string,
-  voiceSegments: any[],
+  voiceSegments: ExternalVoiceSegment[],
   conversation: PodcastConversationItem[],
   speakerVoiceMap: Map<string, string>,
   outputStem1: string,
@@ -31,13 +40,13 @@ export async function generateStems(
     reverseSpeakerMap.set(voiceId, key);
   }
 
-  const segments: InternalSegment[] = (voiceSegments || []).map((seg: any) => {
-    const voiceId = seg.voice_id || seg.voiceId;
+  const segments: InternalSegment[] = (voiceSegments || []).map((seg) => {
+    const voiceId = seg.voice_id || seg.voiceId || '';
     return {
       speaker: reverseSpeakerMap.get(voiceId) || 'speaker1',
       voiceId,
-      startTimeSeconds: seg.start_time_seconds ?? seg.startTimeSeconds,
-      endTimeSeconds: seg.end_time_seconds ?? seg.endTimeSeconds,
+      startTimeSeconds: seg.start_time_seconds ?? seg.startTimeSeconds ?? 0,
+      endTimeSeconds: seg.end_time_seconds ?? seg.endTimeSeconds ?? 0,
     };
   });
 
@@ -92,7 +101,7 @@ export async function generateStems(
  */
 export async function generateIndividualSegments(
   inputAudioPath: string,
-  voiceSegments: any[],
+  voiceSegments: ExternalVoiceSegment[],
   conversation: PodcastConversationItem[],
   speakerVoiceMap: Map<string, string>,
   outputDir: string
@@ -119,21 +128,21 @@ export async function generateIndividualSegments(
 
   const voice1 = Array.from(speakerVoiceMap.values())[0]; // Usually Antoni
   
-  distinctSpeakers.forEach((speakerKey, index) => {
+  distinctSpeakers.forEach((speakerKey) => {
     const vId = speakerVoiceMap.get(speakerKey);
     // If it's the first voice (Antoni/voice1), it's 'm', else 'k'
     const gender = (vId === voice1) ? 'm' : 'k';
     speakerToGender.set(speakerKey, gender);
   });
 
-  const segments: InternalSegment[] = (voiceSegments || []).map((seg: any) => {
-    const voiceId = seg.voice_id || seg.voiceId;
+  const segments: InternalSegment[] = (voiceSegments || []).map((seg) => {
+    const voiceId = seg.voice_id || seg.voiceId || '';
     const speakerKey = reverseSpeakerMap.get(voiceId) || 'speaker1';
     return {
       speaker: speakerKey,
       voiceId,
-      startTimeSeconds: seg.start_time_seconds ?? seg.startTimeSeconds,
-      endTimeSeconds: seg.end_time_seconds ?? seg.endTimeSeconds,
+      startTimeSeconds: seg.start_time_seconds ?? seg.startTimeSeconds ?? 0,
+      endTimeSeconds: seg.end_time_seconds ?? seg.endTimeSeconds ?? 0,
     };
   });
 

@@ -14,7 +14,6 @@ import type {
 } from '@/lib/podcast-video/types';
 
 declare global {
-  // eslint-disable-next-line no-var
   var __podcastVideoJobs: Map<string, PodcastVideoJobRecord> | undefined;
 }
 
@@ -100,6 +99,10 @@ export async function getPodcastVideoJob(jobId: string): Promise<PodcastVideoJob
 
   jobs.set(jobId, fromDisk);
   return fromDisk;
+}
+
+export function evictPodcastVideoJob(jobId: string): void {
+  jobs.delete(jobId);
 }
 
 export async function updatePodcastVideoJob(
@@ -192,7 +195,8 @@ export function toClientPodcastVideoJob(
   record: PodcastVideoJobRecord,
   availableArtifacts?: Awaited<ReturnType<typeof getPodcastVideoJobAvailability>>
 ) {
-  const { files, ...rest } = record;
+  const { files: _files, ...rest } = record;
+  void _files;
   return {
     ...rest,
     availableArtifacts,

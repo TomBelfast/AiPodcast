@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AiPodcast Subtitle Font Preview</title>
+  <style>
+    :root {
+      --bg: #101317;
+      --panel: #171c22;
+      --panel-2: #20262e;
+      --ink: #eef2f7;
+      --muted: #a8b0bd;
+      --accent: #e6ff55;
+      --line: #343c47;
+      --shadow: rgba(0, 0, 0, 0.74);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% 0%, #26313c 0, transparent 30%),
+        linear-gradient(135deg, #101317, #0a0c0f 58%, #161a1f);
+      color: var(--ink);
+      font-family: "Open Sans", "DejaVu Sans", Arial, sans-serif;
+    }
+
+    main {
+      width: min(1240px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 44px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 64px);
+      line-height: 0.94;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.45;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .current-strip {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01)), var(--panel);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .card.current {
+      border-color: rgba(230,255,85,0.72);
+      box-shadow: 0 0 0 1px rgba(230,255,85,0.14), 0 22px 70px rgba(0,0,0,0.42);
+    }
+
+    .decision {
+      border: 1px solid rgba(230,255,85,0.36);
+      background: linear-gradient(135deg, rgba(230,255,85,0.14), rgba(255,255,255,0.03)), #151a20;
+      border-radius: 8px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 100%;
+    }
+
+    .decision h2 {
+      margin: 0 0 10px;
+      font-size: clamp(24px, 3vw, 38px);
+      line-height: 1;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .decision p {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .decision dl {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 8px 14px;
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .decision dt {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-weight: 800;
+    }
+
+    .decision dd {
+      margin: 0;
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-2);
+    }
+
+    .name {
+      font-size: 14px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .status.current-badge {
+      color: #0b0e11;
+      background: var(--accent);
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-weight: 900;
+    }
+
+    .frame {
+      position: relative;
+      aspect-ratio: 16 / 9;
+      min-height: 220px;
+      overflow: hidden;
+      background:
+        linear-gradient(120deg, rgba(0,0,0,0.26), rgba(0,0,0,0.72)),
+        radial-gradient(circle at 72% 28%, rgba(230,255,85,0.22), transparent 20%),
+        linear-gradient(135deg, #4a525d, #1a2028 56%, #090b0f);
+    }
+
+    .scan {
+      position: absolute;
+      inset: 0;
+      background-image: linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px);
+      background-size: 100% 9px;
+      opacity: 0.22;
+    }
+
+    .speaker {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      color: rgba(255,255,255,0.74);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .caption {
+      position: absolute;
+      left: 28px;
+      right: 28px;
+      bottom: 22px;
+      text-align: center;
+      color: #f7f9fc;
+      font-size: clamp(26px, 3.4vw, 44px);
+      line-height: 1.08;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      text-shadow:
+        0 3px 0 var(--shadow),
+        0 -3px 0 var(--shadow),
+        3px 0 0 var(--shadow),
+        -3px 0 0 var(--shadow),
+        0 6px 18px rgba(0,0,0,0.82);
+    }
+
+    .caption .active { color: var(--accent); }
+
+    .sample {
+      padding: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .roboto .caption, .roboto .sample { font-family: Roboto, "DejaVu Sans", Arial, sans-serif; }
+    .noto .caption, .noto .sample { font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif; }
+    .open-sans .caption, .open-sans .sample { font-family: "Open Sans", Arial, sans-serif; }
+    .arial .caption, .arial .sample { font-family: Arial, "Nimbus Sans", sans-serif; }
+    .montserrat .caption, .montserrat .sample { font-family: Montserrat, "DejaVu Sans", Arial, sans-serif; }
+    .poppins .caption, .poppins .sample { font-family: Poppins, "DejaVu Sans", Arial, sans-serif; }
+    .inter .caption, .inter .sample { font-family: Inter, "DejaVu Sans", Arial, sans-serif; }
+    .dejavu .caption, .dejavu .sample { font-family: "DejaVu Sans", Arial, sans-serif; }
+
+    @media (max-width: 880px) {
+      header, .grid, .current-strip { grid-template-columns: 1fr; }
+      main {
+        width: min(680px, calc(100vw - 24px));
+        padding-top: 22px;
+      }
+
+      .decision dl { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Napisy: font preview</h1>
+      <p class="note">
+        Porównanie jednego kadru napisów dla tekstu gwarowego. Status pokazuje,
+        czy font jest realnie dostępny lokalnie na serwerze, czy spada na fallback.
+      </p>
+    </header>
+
+    <section class="current-strip" aria-label="Obecny font produkcyjny">
+      <article class="card dejavu current">
+        <div class="meta"><span class="name">DejaVu Sans Bold</span><span class="status current-badge">obecny w produkcji</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Zofia</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">To jest aktualny font dla ścieżki Gemini + SoulX + burn captions oraz lokalnego renderera.</div>
+      </article>
+
+      <aside class="decision">
+        <div>
+          <h2>Obecny wybór</h2>
+          <p>
+            Produkcyjnie używamy DejaVu Sans, bo jest stabilny na serwerze Linux/ffmpeg
+            i poprawnie renderuje polskie znaki oraz tekst gwarowy.
+          </p>
+        </div>
+        <dl>
+          <dt>Pipeline</dt><dd>Gemini + SoulX + burn captions</dd>
+          <dt>Font</dt><dd>DejaVu Sans</dd>
+          <dt>Status</dt><dd>aktywny w kodzie</dd>
+          <dt>Alternatywa</dt><dd>Noto Sans / Open Sans po instalacji lub konfiguracji</dd>
+        </dl>
+      </aside>
+    </section>
+
+    <section class="grid" aria-label="Porównanie fontów napisów">
+      <article class="card roboto">
+        <div class="meta"><span class="name">Roboto Medium</span><span class="status">fallback lokalnie</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Antoni</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Platformowy wygląd YouTube/Android. Dobry docelowo, jeśli font zostanie doinstalowany.</div>
+      </article>
+
+      <article class="card noto">
+        <div class="meta"><span class="name">Noto Sans Bold</span><span class="status">fallback lokalnie</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Zofia</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Najbezpieczniejszy kierunek dla polskich znaków, gwary i nietypowych glyphów.</div>
+      </article>
+
+      <article class="card open-sans">
+        <div class="meta"><span class="name">Open Sans ExtraBold</span><span class="status">dostępny lokalnie</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Antoni</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Bardzo czytelny, łagodniejszy niż Roboto. Dobry kompromis bez instalacji nowych fontów.</div>
+      </article>
+
+      <article class="card arial">
+        <div class="meta"><span class="name">Arial / Nimbus Sans</span><span class="status">Nimbus Sans lokalnie</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Zofia</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Klasyczny, neutralny, bardzo subtitle-safe. Mniej charakteru, ale wysoka kompatybilność.</div>
+      </article>
+
+      <article class="card montserrat">
+        <div class="meta"><span class="name">Montserrat ExtraBold</span><span class="status">fallback lokalnie</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Antoni</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Bardziej social/shorts. Mocny wizualnie, ale szerszy i mniej wygodny przy długich zdaniach.</div>
+      </article>
+
+      <article class="card poppins">
+        <div class="meta"><span class="name">Poppins Bold</span><span class="status">fallback lokalnie</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Zofia</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Nowoczesny, zaokrąglony, dobry do krótkich energicznych captionów.</div>
+      </article>
+
+      <article class="card inter">
+        <div class="meta"><span class="name">Inter Bold</span><span class="status">fallback lokalnie</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Antoni</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Czysty UI look. Bardzo czytelny, ale mniej charakterystyczny jako napisy wideo.</div>
+      </article>
+
+      <article class="card dejavu">
+        <div class="meta"><span class="name">DejaVu Sans Bold</span><span class="status current-badge">obecny</span></div>
+        <div class="frame"><div class="scan"></div><div class="speaker">Zofia</div><div class="caption">JO CI GÒDOM/GODOM,<br><span class="active">PIERONA</span>, DYĆ MOSZ</div></div>
+        <div class="sample">Najbardziej stabilny technicznie w obecnym rendererze Linux/ffmpeg.</div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

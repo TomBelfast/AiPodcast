@@ -1,6 +1,6 @@
 'use server';
 
-import { getElevenLabsClient, handleError, streamToBase64 } from '@/app/actions/utils';
+import { handleError } from '@/app/actions/utils';
 import { CreateDialogueRequest, CharacterAlignment, Err, Ok, Result, VoiceSegment } from '@/types';
 
 export async function createDialogue(
@@ -73,7 +73,7 @@ export async function createDialogue(
         charactersUsed,
       });
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     return handleError(error, 'dialogue generation');
   }
 }

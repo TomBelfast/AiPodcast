@@ -158,8 +158,7 @@ async function uploadToMinIOStorage(
 ): Promise<{ success: boolean; url?: string; error?: string }> {
   try {
     // Dynamic import to avoid loading MinIO if not needed
-    const minioModule = await import('minio');
-    const MinIO = (minioModule as any).default || minioModule;
+    const { Client } = await import('minio');
 
     // Check if MinIO is configured
     if (!process.env.MINIO_ACCESS_KEY || !process.env.MINIO_SECRET_KEY) {
@@ -188,7 +187,7 @@ async function uploadToMinIOStorage(
       useSSL = true;
     }
 
-    const minioClient = new MinIO.Client({
+    const minioClient = new Client({
       endPoint,
       port,
       useSSL,
@@ -235,10 +234,19 @@ async function uploadToMinIOStorage(
     let url: string;
     try {
       const policy = await minioClient.getBucketPolicy(bucketName);
-      const policyObj = JSON.parse(policy);
-      const isPublic = policyObj.Statement?.some((stmt: any) =>
-        stmt.Effect === 'Allow' && stmt.Principal?.AWS?.includes('*')
-      );
+      const policyObj = JSON.parse(policy) as {
+        Statement?: Array<{
+          Effect?: string;
+          Principal?: { AWS?: string[] | string };
+        }>;
+      };
+      const isPublic = policyObj.Statement?.some((stmt) => {
+        const awsPrincipal = stmt.Principal?.AWS;
+        const allowsEveryone = Array.isArray(awsPrincipal)
+          ? awsPrincipal.includes('*')
+          : awsPrincipal === '*';
+        return stmt.Effect === 'Allow' && allowsEveryone;
+      });
 
       if (isPublic) {
         const protocol = useSSL ? 'https' : 'http';
@@ -258,12 +266,11 @@ async function uploadToMinIOStorage(
       success: true,
       url,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('MinIO upload error:', error);
     return {
       success: false,
-      error: error.message || 'Failed to upload to MinIO',
+      error: error instanceof Error ? error.message : 'Failed to upload to MinIO',
     };
   }
 }
-

@@ -3,6 +3,24 @@ import { PodcastConversationItem } from '../src/lib/podcast-video/types';
 import path from 'path';
 import { promises as fs } from 'fs';
 
+interface ArchivedSpeaker {
+  name: string;
+  voice_id: string;
+}
+
+interface ArchivedSegment {
+  speaker: string;
+  voice_id: string;
+  start_time: number;
+  end_time: number;
+  text: string;
+}
+
+interface ArchivedTranscript {
+  speakers: ArchivedSpeaker[];
+  segments: ArchivedSegment[];
+}
+
 async function testRealJob() {
   const jobId = 'podcast_video_1774474453344_nbv9ro';
   console.log(`--- Rozpoczynam test na prawdziwym zadaniu: ${jobId} ---`);
@@ -15,24 +33,24 @@ async function testRealJob() {
   const transcriptPath = path.join(jobDir, 'transcript.json');
   
   try {
-    const transcript = JSON.parse(await fs.readFile(transcriptPath, 'utf8'));
+    const transcript = JSON.parse(await fs.readFile(transcriptPath, 'utf8')) as ArchivedTranscript;
     
     // Budujemy speakerVoiceMap na podstawie transcriptu
     const speakerVoiceMap = new Map<string, string>();
     const conversation: PodcastConversationItem[] = [];
     
-    transcript.speakers.forEach((s: any) => {
+    transcript.speakers.forEach((s) => {
       speakerVoiceMap.set(s.name.toLowerCase(), s.voice_id);
     });
     
     // Budujemy liste voiceSegments i konwersacje
-    const voiceSegments = transcript.segments.map((seg: any) => ({
+    const voiceSegments = transcript.segments.map((seg) => ({
       voiceId: seg.voice_id,
       startTimeSeconds: seg.start_time,
       endTimeSeconds: seg.end_time
     }));
     
-    transcript.segments.forEach((seg: any) => {
+    transcript.segments.forEach((seg) => {
       conversation.push({ speaker: seg.speaker, text: seg.text });
     });
 

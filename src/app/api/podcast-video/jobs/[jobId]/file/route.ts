@@ -10,10 +10,12 @@ import { isPodcastVideoAuthorized } from '@/lib/podcast-video/http';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function parseType(rawType: string | null): 'json' | 'mp3' | 'srt' | 'mp4' | 'stem1' | 'stem2' | 'segment' | null {
-  const valid = ['json', 'mp3', 'srt', 'mp4', 'stem1', 'stem2', 'segment'];
-  if (valid.includes(rawType || '')) {
-    return rawType as any;
+const artifactTypes = ['json', 'mp3', 'srt', 'mp4', 'stem1', 'stem2', 'segment'] as const;
+type ArtifactType = (typeof artifactTypes)[number];
+
+function parseType(rawType: string | null): ArtifactType | null {
+  if (artifactTypes.includes(rawType as ArtifactType)) {
+    return rawType as ArtifactType;
   }
   return null;
 }

@@ -108,7 +108,7 @@ IMPORTANT: Max 10-15 exchanges. Focus on the dialectal differences and personali
 
     console.log('LLM response received!');
     console.log('GENERTED CONVERSATION:');
-    object.conversation.forEach((item, i) => {
+    object.conversation.forEach((item) => {
       console.log(`[${item.speaker}]: ${item.text}`);
     });
     console.log('-----------------------------------');

@@ -6,6 +6,7 @@ const CONFIG_PATH = path.join(process.cwd(), '.admin_settings.json');
 export interface AdminSettings {
     openai_api_key?: string;
     elevenlabs_api_key?: string;
+    gemini_api_key?: string;
     main_prompt?: string;
     polish_ending_prompt?: string;
     host_prompt_polish?: string;
@@ -51,6 +52,7 @@ export function getEffectiveAdminSettings(): AdminSettings {
     return {
         openai_api_key: local.openai_api_key || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY,
         elevenlabs_api_key: local.elevenlabs_api_key || process.env.ELEVENLABS_API_KEY,
+        gemini_api_key: local.gemini_api_key || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
         main_prompt: local.main_prompt,
         polish_ending_prompt: local.polish_ending_prompt,
         host_prompt_polish: local.host_prompt_polish,
