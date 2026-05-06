@@ -54,6 +54,13 @@ import {
   readStatus,
 } from '@/lib/podcast-video/job-status';
 import {
+  acquirePodcastFilmDockerLease,
+  ensurePodcastFilmDockerContainersStarted,
+  getPodcastFilmInfrastructureMaxRetries,
+  restartPodcastFilmDockerContainers,
+  runWithPodcastFilmInfrastructureRetries,
+} from '@/lib/podcast-video/docker-lifecycle';
+import {
   DEFAULT_ELEVENLABS_VOICES,
   DEFAULT_GEMINI_VOICES,
   GEMINI_VOICE_OPTIONS,
@@ -62,6 +69,16 @@ import {
 
 const OMNIVOICE_JOB_TIMEOUT_MS = 15 * 60 * 1000;
 const WORKER_PROBE_TIMEOUT_MS = 2500;
+const WORKER_READY_TIMEOUT_MS = readEnvNumber(
+  process.env.PODCAST_FILM_WORKER_READY_TIMEOUT_MS,
+  120000,
+  5000
+);
+const WORKER_READY_POLL_MS = readEnvNumber(
+  process.env.PODCAST_FILM_WORKER_READY_POLL_MS,
+  3000,
+  1000
+);
 const INTERNAL_GENERATE_PODCAST_TIMEOUT_MS = 8 * 60 * 1000;
 const INTERNAL_GENERATE_PODCAST_ATTEMPT_TIMEOUT_MS = 150 * 1000;
 const OPENAI_WHISPER_TIMEOUT_MS = 2 * 60 * 1000;
@@ -210,6 +227,14 @@ class PipelineInputError extends Error {
 const GEMINI_VOICE_OPTIONS_BY_ID = new Map(
   GEMINI_VOICE_OPTIONS.map((voice) => [voice.id.toLowerCase(), voice])
 );
+
+function readEnvNumber(value: string | undefined, fallback: number, min: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.round(parsed));
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -765,6 +790,55 @@ async function runWorkerPreflightChecks(ttsEngine: TtsEngine): Promise<WorkerPro
     return Promise.all([probeOmniVoiceAssetReadiness(), probeSoulXReadiness()]);
   }
   return Promise.all([probeOmniVoiceReadiness(), probeSoulXReadiness()]);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function summarizeFailedWorkerChecks(workerChecks: WorkerProbeResult[]): string {
+  return workerChecks
+    .filter((check) => !check.ok)
+    .map((check) => `${check.service}: ${check.detail}`)
+    .join(' | ');
+}
+
+async function waitForWorkerPreflightChecks(ttsEngine: TtsEngine): Promise<WorkerProbeResult[]> {
+  const deadline = Date.now() + WORKER_READY_TIMEOUT_MS;
+  let checks = await runWorkerPreflightChecks(ttsEngine);
+
+  while (checks.some((check) => !check.ok) && Date.now() < deadline) {
+    await delay(WORKER_READY_POLL_MS);
+    checks = await runWorkerPreflightChecks(ttsEngine);
+  }
+
+  return checks;
+}
+
+async function restartPodcastFilmInfrastructure(cause: unknown): Promise<void> {
+  const restart = await restartPodcastFilmDockerContainers();
+  if (restart.enabled) {
+    console.warn(`[podcast-film] Docker restart result: ${restart.detail}`);
+  }
+  if (restart.enabled && !restart.ok) {
+    throw new Error(`Podcast-film Docker restart failed: ${restart.detail}`, {
+      cause,
+    });
+  }
+}
+
+async function ensurePodcastFilmInfrastructureReadyAfterRestart(
+  ttsEngine: TtsEngine,
+  cause: unknown
+): Promise<void> {
+  const checks = await waitForWorkerPreflightChecks(ttsEngine);
+  const detail = summarizeFailedWorkerChecks(checks);
+  if (detail) {
+    throw new Error(
+      `Podcast-film worker preflight failed after Docker restart: ${detail}`,
+      { cause }
+    );
+  }
 }
 
 function resolveGenderedVoicePair(
@@ -2972,17 +3046,26 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const workerChecks = await runWorkerPreflightChecks(ttsEngine);
+    const infrastructureLease = acquirePodcastFilmDockerLease();
+    const dockerStart = await ensurePodcastFilmDockerContainersStarted();
+    if (dockerStart.enabled) {
+      console.info(`[podcast-film] Docker start result: ${dockerStart.detail}`);
+    }
+
+    const workerChecks =
+      dockerStart.enabled && dockerStart.dockerAvailable
+        ? await waitForWorkerPreflightChecks(ttsEngine)
+        : await runWorkerPreflightChecks(ttsEngine);
     const failedWorkerChecks = workerChecks.filter((check) => !check.ok);
     if (failedWorkerChecks.length > 0) {
-      const detail = failedWorkerChecks
-        .map((check) => `${check.service}: ${check.detail}`)
-        .join(' | ');
+      infrastructureLease.release();
+      const detail = summarizeFailedWorkerChecks(workerChecks);
       return NextResponse.json(
         {
           error: 'Podcast-film worker preflight failed.',
           detail,
           checks: workerChecks,
+          docker_lifecycle: dockerStart,
         },
         { status: 503 }
       );
@@ -2993,7 +3076,35 @@ export async function POST(request: NextRequest) {
 
     void (async () => {
       try {
-        await runBackgroundPipeline(jobId, config, publicBaseUrl, internalAppBaseUrl);
+        await runWithPodcastFilmInfrastructureRetries({
+          maxRetries: getPodcastFilmInfrastructureMaxRetries(),
+          operation: async ({ attempt }) => {
+            if (attempt > 0) {
+              await setPhase(
+                jobId,
+                'fetch_voices_images',
+                `Retrying after infrastructure restart (${attempt}/${getPodcastFilmInfrastructureMaxRetries()})…`
+              );
+            }
+            await runBackgroundPipeline(jobId, config, publicBaseUrl, internalAppBaseUrl);
+          },
+          onRetry: async ({ error, nextAttempt, maxRetries }) => {
+            console.warn(
+              `[podcast-film] job ${jobId} infrastructure retry ${nextAttempt}/${maxRetries}: ${describeError(error)}`
+            );
+            await setPhase(
+              jobId,
+              'fetch_voices_images',
+              `Infrastructure error. Restarting Docker containers and retrying ${nextAttempt}/${maxRetries}…`
+            );
+          },
+          restartInfrastructure: async ({ error }) => {
+            await restartPodcastFilmInfrastructure(error);
+          },
+          ensureReady: async ({ error }) => {
+            await ensurePodcastFilmInfrastructureReadyAfterRestart(ttsEngine, error);
+          },
+        });
       } catch (error) {
         console.error(`[podcast-film] job ${jobId} failed:`, error);
         const cur = await readStatus(jobId);
@@ -3006,6 +3117,8 @@ export async function POST(request: NextRequest) {
           return;
         }
         await markFailed(jobId, describeError(error), cur?.phase ?? null);
+      } finally {
+        infrastructureLease.release();
       }
     })();
 
