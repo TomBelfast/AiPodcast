@@ -1041,9 +1041,10 @@ type SafeMp4MetadataValue = string | number | boolean | null | undefined;
 
 function sanitizeMp4MetadataValue(value: SafeMp4MetadataValue): string | null {
   if (value === null || value === undefined) return null;
-  const text = String(value).replace(/[\r\n]+/g, ' ').trim();
+  const text = String(value).trim();
   if (!text) return null;
-  return text.slice(0, 500);
+  // Increase limit to 32KB to allow full transcripts
+  return text.slice(0, 32000);
 }
 
 async function writeSafeMp4GenerationMetadata(
@@ -2659,8 +2660,12 @@ async function runBackgroundPipeline(
     config.ttsEngine === 'omnivoice'
       ? workerElapsedMs
       : directData!.elapsed_ms;
+  const fullTranscript = segments.map((s) => `[${s.speaker}]: ${s.text}`).join('\n');
+
   const metadataWrite = await writeSafeMp4GenerationMetadata(finalMp4Path, {
     title: config.title || `Podcast film ${jobId}`,
+    description: fullTranscript,
+    ai_transcript: fullTranscript,
     comment: [
       'ai_pipeline=podcast-film-v1',
       `job_id=${jobId}`,
