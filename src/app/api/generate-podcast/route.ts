@@ -15,7 +15,7 @@ import {
 } from "@/lib/podcast/contracts";
 import { supabase } from "@/lib/supabase";
 
-const GENERATE_PODCAST_TIMEOUT_MS = 75_000;
+const GENERATE_PODCAST_TIMEOUT_MS = 150_000;
 const GENERATE_PODCAST_MAX_ATTEMPTS = 3;
 const GENERATE_PODCAST_MIN_TIMEOUT_MS = 30_000;
 const GENERATE_PODCAST_MAX_TIMEOUT_MS = 180_000;
@@ -426,6 +426,26 @@ SYNTAX AND GRAMMATICAL CORRECTNESS:
 - Double-check that all noun phrases, verb phrases, and sentence structures follow the rules of the target language
 - If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`;
 
+    // Slim main prompt for the Polish + omnivoice path. The full `defaultMainPrompt`
+    // contains English Speaker1/2 examples, em-dash interruptions and bracketed cues
+    // ([laughs], [sighs]) that directly contradict the omnivoice TTS guard, which leads
+    // some models to inflate lines and ignore length rules. Keep only the parts that
+    // do NOT conflict: numbers-as-words and Polish gender/case grammar.
+    const defaultPolishOmnivoiceMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS in the Polish conversation. Spell out all numbers, percentages, years, quantities. Examples: "5" → "pięć", "23" → "dwadzieścia trzy", "100" → "sto", "250" → "dwieście pięćdziesiąt", "1000" → "tysiąc", "2024" → "dwa tysiące dwadzieścia cztery", "50%" → "pięćdziesiąt procent". Never use digits (0-9) or numeric symbols anywhere in the conversation.
+
+GRAMMATICAL ACCURACY (Polish gender inflection):
+- Antoni (male): MASCULINE past-tense forms — "byłem", "zrobiłem", "pomyślałem", "widziałem", "powiedziałem".
+- Zofia (female): FEMININE past-tense forms — "byłam", "zrobiłam", "pomyślałam", "widziałam", "powiedziałam".
+- When Antoni addresses Zofia in 2nd person past tense: FEMININE — "słyszałaś", "widziałaś", "musiałaś", "czytałaś" (NOT "słyszałeś"/"musiałeś"). This includes dialect forms — use "czytałaś"/"widziołaś" not "czytołeś"/"widziołeś".
+- When Zofia addresses Antoni in 2nd person past tense: MASCULINE — "słyszałeś", "widziałeś", "musiałeś", "kiebyś pomyślał", "wiedzioł".
+
+SYNTAX AND GRAMMATICAL CORRECTNESS (Polish):
+- Correct case endings (mianownik, dopełniacz, celownik, biernik, narzędnik, miejscownik, wołacz).
+- Proper verb conjugations, noun-adjective agreement, correct prepositions with the right case.
+- Examples: "polewanie zimną wodą" (NIE "lanie pod zimną wodę"), "działanie pod presją" (NIE "działanie pod presje").
+- Use punctuation: commas between clauses, periods at sentence ends. Do NOT drop commas to save characters.
+- Natural, idiomatic Polish; if unsure, prefer simpler but correct constructions.`;
+
     const defaultPolishEndingPrompt = ``;
 
     const defaultHostPersonalitiesPolish = `TOP PRIORITY — STYL ROGANA (JAK W JOE ROGAN PODCAST):
@@ -433,12 +453,12 @@ Dialog MUSI być dynamiczny i szybki jak w najlepszych odcinkach Rogana z cięż
 polskim humorem. NIE jest to suchy komentarz newsowy. To pyskówka dwojga
 kolegów w pubie.
 
-TWARDE ZASADY DŁUGOŚCI (cel: podcast 1.5-2.5 minuty):
-- Każda kwestia MAX 2-3 zdania. MAX 220 znaków na kwestię.
-- ŻADNYCH długich tyrad ani pompatycznych wywodów — ale fakt + pointa OK.
+TWARDE ZASADY DŁUGOŚCI (cel: podcast ~2 minuty):
+- DOKŁADNIE 10 wymian (5 Antoni + 5 Zofia). Nie 8, nie 9. 10.
+- KAŻDA kwestia: 150-200 znaków (TWARDY górny limit 200, NIGDY 210+). POD 150 = porażka (dopakuj callback, pointę, drugi gag).
+- Łącznie cały dialog 1700-2000 znaków (target ~1850).
+- ŻADNYCH długich tyrad — ale fakt + pointa + reakcja OK i POŻĄDANE.
 - Dialog dynamiczny, "ping-pong": reakcja, pointa, reakcja, pointa.
-- Total: DOKŁADNIE 10 wymian (5 Antoni + 5 Zofia). Nie mniej.
-- Łącznie cały dialog 1600-2200 znaków (to daje ~1.5-2.5 min w TTS).
 
 PRIORYTET TREŚCI (gdy konkurują, wybieraj tak):
 1) GWARA (min. 2 markery w kwestii)
@@ -448,10 +468,10 @@ PRIORYTET TREŚCI (gdy konkurują, wybieraj tak):
 Antoni (Male - Energetic & Naive):
 - Skrajnie entuzjastyczny, podekscytowany, naiwny do bólu.
 - MASCULINE grammatical forms: "byłem", "zrobiłem", "widziałem", "godom".
-- ADDRESSING ZOFIA: FEMININE formy: "słyszałaś", "widziałaś".
+- ADDRESSING ZOFIA (CRITICAL): ALWAYS use FEMININE 2nd-person forms — "słyszałaś" (NOT "słyszałeś"), "widziałaś" (NOT "widziałeś"), "musiałaś" (NOT "musiałeś"), "czytałaś" (NOT "czytałeś"). Dialekt śląski też: "żeś słyszała" (NOT "żeś słyszał"), "żeś widziała" (NOT "żeś widział"). Nigdy nie używaj form męskich kiedy zwracasz się do Zofii.
 - DIALEKT ŚLĄSKI — MIN. 2 wyrazy śląskie z listy w KAŻDEJ kwestii:
   jo, ino, kaj, fajnie, godom, wiym, idymy, bydzie, żeś, gryfny,
-  pierona, rychtyg, siekiera, łokno, cza, żech, czytoł, pieruńsko.
+  pierona, rychtyg, łokno, cza, żech, czytoł, pieruńsko.
 - Signature: "Jo Ci godom…", "Kaj tam…", "Rychtyg…", "Pierona!".
 - Wyciąga absurdalne konsekwencje hype'u. Pyta naiwne pytania.
 - Emocja: ma brzmieć jak gość, który się serio zajarał tematem i ledwo nadąża za własną ekscytacją.
@@ -467,18 +487,15 @@ Zofia (Female - Sarcastic & Cynical):
 - Nie moralizuje — żartuje. Jedna sarkastyczna pointa wystarczy.
 - Emocja: ma brzmieć jak ktoś rozbawiony cudzą naiwnością, ale bez teatralnego przerysowania.
 
-PRZYKŁAD WZORCOWEJ WYMIANY ROGAN-STYLE (naśladuj tempo, nie słowa):
-Antoni: "Jo Ci godom, siekiera jak oni ten model wypuścili — cołki internet szaleje!"
-Zofia: "Hej, tyż mi szał — jesce wczoraj obiecywali że stary wszystko ogarnie."
-Antoni: "Pieruńsko, trzy razy lepij obrazki rozumi! Rychtyg czary!"
-Zofia: "Czary, juści. Kiej zmienisz mu jeden przecinek, zapomina co widzioł."
-Antoni: "Ale godom, automatyzuje cołki workflow w chmurze, fajnie nie?"
-Zofia: "Fajnie, dyć kiebyś przeczytoł cennik, to byś se na kawę nie odłożył."
-Antoni: "A ten Mythos sekretny? Pierona, ukrywajom przed nami bombę!"
-Zofia: "Hej, kozdy tak robi — hype najpierw, kod potem, prawda na końcu."
+PRZYKŁAD WZORCOWEJ WYMIANY ROGAN-STYLE (naśladuj tempo, długość ~170 zn na kwestię, nie słowa):
+Antoni: "Jo Ci godom, kaj tam normalne wydania — oni ten Claude wypuścili, cołki internet szaleje, programiści se rwą włosy, a ja siedzę z herbatą i nie ogarniam, pierona!" (167 zn)
+Zofia: "Hej, tyż mi szał — jesce wczoraj ci sami obiecywali że stary wszystko ogarnie, a teraz nagle nowy bóg z chmury zstąpił. Kozdy hype tak się kończy, mosz pewność." (165 zn)
+Antoni: "Pieruńsko, ale trzy razy lepij obrazki rozumi niż poprzedni! Rychtyg czary, żech sprawdzał i poznoł psa na zdjęciu w pół sekundy. Jo Ci godom, świat sie kończy." (168 zn)
+Zofia: "Czary, juści. Kiej zmienisz mu jeden przecinek w prompcie, to zapomina co widzioł i pisze że to kot. Ftory inżynier ma jeszcze odwagę to puścić na produkcję?" (162 zn)
+Antoni: "Ale godom Ci, on całe strony www z opisu robi! Wpisujesz 'piękny sklepik', a on Ci dwa razy klika i fajnie wygląda. Pierona, kaj my idymy z tą technologią!" (159 zn)
 
-Zauważ: krótko, szybko, każda kwestia = gwara + pointa + reakcja. Rogan
-by przybił piątkę.`;
+Zauważ: krótko ale GĘSTO. Każda kwestia = gwara (2+ markery) + fakt + pointa + reakcja.
+Nie wolno: "Pierona, jakieś cuda!" (43 zn) — za krótkie, brak treści. Rogan by się obraził.`;
 
     const defaultHostPersonalitiesOther = `HOST PERSONALITIES:
 Speaker1 (Male - Energetic & Naive):
@@ -520,7 +537,7 @@ Each turn max 120 characters; target 40-70. At least 4 turns are 2-7 words.
 Use exactly 4 total cues from: [laughing], [sigh], [uhm], [short pause].
 Use at least 4 questions. No other bracketed text.
 
-Antoni: male, Silesian hype, naive and funny. Use natural markers: jo, godom, pierona, rychtyg, cza, kaj, gryfny, idymy, żech, siekiera.
+Antoni: male, Silesian hype, naive and funny. Use natural markers: jo, godom, pierona, rychtyg, cza, kaj, gryfny, idymy, żech, łokno.
 Zofia: female, Goral counterpunch, dry sarcasm. Her turns are usually shorter and sharper than Antoni's. Use: hej, dyć, kiej, kiebyś, mosz, juści, pado, fcora, tyż.
 
 Rhythm example:
@@ -542,7 +559,11 @@ Zofia: "[sigh] Magia kończy się, kiej przychodzi faktura."`;
     }
 
     const defaultMainPromptForRequest =
-      isPolish && isGeminiExpressive ? defaultMainPromptGeminiExpressivePolish : defaultMainPrompt;
+      isPolish && isGeminiExpressive
+        ? defaultMainPromptGeminiExpressivePolish
+        : isPolish && isPlainSpeakableTts
+          ? defaultPolishOmnivoiceMainPrompt
+          : defaultMainPrompt;
     const effectiveMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPromptForRequest;
 
     console.log(`[Generate Podcast] Request starting: title="${title || 'Article'}", language="${language}"`);
@@ -590,7 +611,11 @@ Zofia: "[sigh] Magia kończy się, kiej przychodzi faktura."`;
 
       const podcastFormatInstruction = isPolish && isGeminiExpressive
         ? `IMPORTANT: Make this a fast Silesian-Goral Gemini expressive-lite podcast. Use EXACTLY 16 short alternating turns: Antoni, Zofia, Antoni, Zofia. Aim for 650-950 characters total. Keep it snappy, reactive, funny, and directly speakable.`
-        : `IMPORTANT: Make this a VERY SHORT, high-energy podcast of about 1.5-2 minutes. Aim for 1200-1800 characters total (ABSOLUTE MAXIMUM — NEVER EXCEED 2200 chars). Use only 7-9 short and dynamic exchanges. Condense only the most vital points.`;
+        : `IMPORTANT — HARD LENGTH RULES (consistent with host-personality section below; if anything conflicts later, THESE win):
+- EXACTLY 10 exchanges (5 Antoni + 5 Zofia, alternating, starting with Antoni).
+- TOTAL conversation length: 1700–2000 characters (target ~1850). Below 1700 is a FAILURE. Above 2000 is a FAILURE.
+- EVERY single line: 150–200 characters (HARD upper bound 200, NEVER 210+). Lines below 150 chars are a FAILURE — pack in a follow-up, a callback, or a sharper punchline. Lines above 200 are a FAILURE — trim filler.
+- Podcast target duration after TTS: 2 minutes. Short stubs (<150 chars) collapse to <1 min and ruin the format.`;
 
       const prompt = `${ttsGuard}${podcastFormatInstruction}
 
