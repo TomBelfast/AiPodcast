@@ -21,13 +21,26 @@ function cfg(key: string, fallback = ""): string {
   return process.env[key] || readEnv()[key] || fallback;
 }
 
+async function fetchYoutubeTitle(videoUrl: string): Promise<string> {
+  try {
+    const oembed = `https://www.youtube.com/oembed?url=${encodeURIComponent(videoUrl)}&format=json`;
+    const res = await fetch(oembed, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      const data = (await res.json()) as { title?: string };
+      if (data.title) return data.title;
+    }
+  } catch {}
+  return videoUrl.match(/[?&]v=([^&]+)/)?.[1] ?? videoUrl;
+}
+
 async function fetchTranscript(videoUrl: string): Promise<{ text: string; title: string }> {
-  const items = await YoutubeTranscript.fetchTranscript(videoUrl, { lang: "pl" })
-    .catch(() => YoutubeTranscript.fetchTranscript(videoUrl));
+  const [items, title] = await Promise.all([
+    YoutubeTranscript.fetchTranscript(videoUrl, { lang: "pl" })
+      .catch(() => YoutubeTranscript.fetchTranscript(videoUrl)),
+    fetchYoutubeTitle(videoUrl),
+  ]);
   const text = items.map((i) => i.text).join(" ");
-  // próba wyciągnięcia tytułu z URL jako fallback
-  const videoId = videoUrl.match(/[?&]v=([^&]+)/)?.[1] ?? videoUrl;
-  return { text, title: videoId };
+  return { text, title };
 }
 
 async function callLLM(transcript: string): Promise<string> {
@@ -115,7 +128,7 @@ export async function POST(req: Request) {
       summaryText,
     }).returning({ id: summary.id });
 
-    return NextResponse.json({ summary: summaryText, id: saved?.id });
+    return NextResponse.json({ summary: summaryText, id: saved?.id, title, youtubeUrl: videoUrl });
   } catch (err) {
     console.error("[summarize]", err);
     const msg = err instanceof Error ? err.message : String(err);

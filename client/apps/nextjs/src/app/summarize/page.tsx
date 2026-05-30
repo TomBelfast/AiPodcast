@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 type SummaryState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "done"; text: string; id?: string }
+  | { status: "done"; text: string; id?: string; title?: string; youtubeUrl?: string }
   | { status: "error"; message: string };
 
 type PodcastState =
@@ -72,11 +72,11 @@ export default function SummarizePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim() }),
       });
-      const data = (await res.json()) as { summary?: string; id?: string; error?: string };
+      const data = (await res.json()) as { summary?: string; id?: string; title?: string; youtubeUrl?: string; error?: string };
       if (!res.ok || data.error) {
         setSummary({ status: "error", message: data.error ?? "Nieznany błąd" });
       } else {
-        setSummary({ status: "done", text: data.summary ?? "", id: data.id });
+        setSummary({ status: "done", text: data.summary ?? "", id: data.id, title: data.title, youtubeUrl: data.youtubeUrl });
         void loadHistory();
       }
     } catch (err) {
@@ -111,7 +111,7 @@ export default function SummarizePage() {
 
   function loadFromHistory(item: HistoryItem) {
     setUrl(item.youtubeUrl);
-    setSummary({ status: "done", text: item.summaryText, id: item.id });
+    setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl });
     if (item.podcastPath) {
       setPodcast({ status: "done", url: item.podcastPath });
     } else {
@@ -146,15 +146,13 @@ export default function SummarizePage() {
                   onClick={() => loadFromHistory(item)}
                   className="w-full text-left px-4 py-3 hover:bg-muted/50 transition-colors"
                 >
-                  <p className="text-xs font-medium truncate text-foreground">
-                    {item.title || new URL(item.youtubeUrl).searchParams.get("v") || item.youtubeUrl}
+                  <p className="text-xs font-medium text-foreground line-clamp-2 leading-snug">
+                    {item.title}
                   </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
+                  <p className="text-xs text-muted-foreground mt-1">
                     {formatDate(item.createdAt)}
+                    {item.podcastPath && <span className="ml-2">🎙</span>}
                   </p>
-                  {item.podcastPath && (
-                    <span className="text-xs text-primary">🎙 podcast</span>
-                  )}
                 </button>
               </li>
             ))}
@@ -200,7 +198,24 @@ export default function SummarizePage() {
           {activeSummary && (
             <div className="space-y-4">
               <div className="bg-card rounded-lg border p-5">
-                <h2 className="mb-3 text-lg font-semibold">Podsumowanie</h2>
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    {activeSummary.title && (
+                      <p className="text-xs text-muted-foreground mb-1">{activeSummary.title}</p>
+                    )}
+                    <h2 className="text-lg font-semibold">Podsumowanie</h2>
+                  </div>
+                  {activeSummary.youtubeUrl && (
+                    <a
+                      href={activeSummary.youtubeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors"
+                    >
+                      ▶ Źródło
+                    </a>
+                  )}
+                </div>
                 <div className="text-muted-foreground whitespace-pre-wrap text-sm leading-7">
                   {activeSummary.text}
                 </div>
