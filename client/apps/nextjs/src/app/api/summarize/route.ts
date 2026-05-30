@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import { YoutubeTranscript } from "youtube-transcript";
 import { NextResponse } from "next/server";
+import { db } from "@acme/db/client";
+import { summary } from "@acme/db/schema";
 
 function readEnv(): Record<string, string> {
   try {
@@ -19,18 +21,21 @@ function cfg(key: string, fallback = ""): string {
   return process.env[key] || readEnv()[key] || fallback;
 }
 
-async function fetchTranscript(videoUrl: string): Promise<string> {
+async function fetchTranscript(videoUrl: string): Promise<{ text: string; title: string }> {
   const items = await YoutubeTranscript.fetchTranscript(videoUrl, { lang: "pl" })
     .catch(() => YoutubeTranscript.fetchTranscript(videoUrl));
-  return items.map((i) => i.text).join(" ");
+  const text = items.map((i) => i.text).join(" ");
+  // próba wyciągnięcia tytułu z URL jako fallback
+  const videoId = videoUrl.match(/[?&]v=([^&]+)/)?.[1] ?? videoUrl;
+  return { text, title: videoId };
 }
 
-async function summarize(transcript: string): Promise<string> {
+async function callLLM(transcript: string): Promise<string> {
   const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
   const apiKey = cfg("LLM_API_KEY");
   const model  = cfg("LLM_MODEL", "gemini-2.5-flash");
 
-  if (!apiUrl || !apiKey) {
+  if (!cfg("LLM_API_URL") || !apiKey) {
     throw new Error("LLM_API_URL i LLM_API_KEY muszą być skonfigurowane w .env");
   }
 
@@ -90,12 +95,24 @@ export async function POST(req: Request) {
   }
 
   try {
-    const transcript = await fetchTranscript(videoUrl);
+    const { text: transcript, title } = await fetchTranscript(videoUrl);
     if (!transcript) {
       return NextResponse.json({ error: "Nie można pobrać transkryptu z tego wideo" }, { status: 422 });
     }
-    const summary = await summarize(transcript);
-    return NextResponse.json({ summary });
+
+    const summaryText = await callLLM(transcript);
+    if (!summaryText) {
+      return NextResponse.json({ error: "LLM nie zwróciło treści" }, { status: 502 });
+    }
+
+    const [saved] = await db.insert(summary).values({
+      youtubeUrl: videoUrl,
+      title,
+      transcript,
+      summaryText,
+    }).returning({ id: summary.id });
+
+    return NextResponse.json({ summary: summaryText, id: saved?.id });
   } catch (err) {
     console.error("[summarize]", err);
     const msg = err instanceof Error ? err.message : String(err);

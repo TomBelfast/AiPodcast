@@ -213,4 +213,14 @@ export const shareSignal = pgTable(
   ],
 );
 
+export const summary = pgTable("summary", (t) => ({
+  id: t.uuid().notNull().primaryKey().defaultRandom(),
+  youtubeUrl: t.text().notNull(),
+  title: t.varchar({ length: 512 }).notNull().default(""),
+  transcript: t.text().notNull().default(""),
+  summaryText: t.text().notNull(),
+  podcastPath: t.text(),
+  createdAt: t.timestamp({ withTimezone: true }).defaultNow().notNull(),
+}));
+
 export * from "./auth-schema";
