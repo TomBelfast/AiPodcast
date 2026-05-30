@@ -16,10 +16,45 @@ function getTtsUrl(): string {
   } catch {}
   return "http://localhost:8765";
 }
+
 const PODCASTS_DIR = "/app/podcasts";
 
 function ensurePodcastsDir() {
   if (!fs.existsSync(PODCASTS_DIR)) fs.mkdirSync(PODCASTS_DIR, { recursive: true });
+}
+
+// Generuje audio w tle — niezależnie od połączenia z przeglądarką.
+// Zapis pliku i aktualizacja bazy następuje po zakończeniu generowania.
+async function generateInBackground(text: string, voice: string, summaryId: string | undefined) {
+  try {
+    const res = await fetch(`${getTtsUrl()}/synthesize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice, lang: "na" }),
+      // brak signal — generowanie nie zostanie przerwane nawet jeśli
+      // klient rozłączy się lub zmieni stronę
+    });
+
+    if (!res.ok) {
+      console.error("[tts bg] TTS error:", res.status);
+      return;
+    }
+
+    const audio = Buffer.from(await res.arrayBuffer());
+
+    if (summaryId) {
+      ensurePodcastsDir();
+      const filename = `podcast_${summaryId}.wav`;
+      const filepath = path.join(PODCASTS_DIR, filename);
+      fs.writeFileSync(filepath, audio);
+      await db.update(summary)
+        .set({ podcastPath: `/api/podcast/${filename}` })
+        .where(eq(summary.id, summaryId));
+      console.log(`[tts bg] saved ${filepath}`);
+    }
+  } catch (err) {
+    console.error("[tts bg] failed:", err);
+  }
 }
 
 export async function POST(req: Request) {
@@ -34,47 +69,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Podaj tekst do syntezy" }, { status: 400 });
   }
 
-  try {
-    const res = await fetch(`${getTtsUrl()}/synthesize`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice, lang: "na" }),
-    });
+  // Odpal w tle i natychmiast odpowiedz — nawigacja nie przerwie generowania
+  void generateInBackground(text, voice, summaryId);
 
-    if (!res.ok) {
-      let errMsg = `TTS HTTP ${res.status}`;
-      try { const e = (await res.json()) as { error?: string }; errMsg = e.error ?? errMsg; } catch {}
-      return NextResponse.json({ error: errMsg }, { status: 502 });
-    }
-
-    const audio = Buffer.from(await res.arrayBuffer());
-
-    // zapisz plik i zaktualizuj rekord w bazie
-    if (summaryId) {
-      try {
-        ensurePodcastsDir();
-        const filename = `podcast_${summaryId}.wav`;
-        const filepath = path.join(PODCASTS_DIR, filename);
-        fs.writeFileSync(filepath, audio);
-        await db.update(summary)
-          .set({ podcastPath: `/api/podcast/${filename}` })
-          .where(eq(summary.id, summaryId));
-      } catch (e) {
-        console.warn("[tts] could not save podcast file:", e);
-      }
-    }
-
-    return new Response(audio, {
-      headers: {
-        "Content-Type": "audio/wav",
-        "Content-Disposition": "attachment; filename=podcast.wav",
-      },
-    });
-  } catch (err) {
-    console.error("[tts] fetch failed:", err);
-    return NextResponse.json(
-      { error: "Nie można połączyć się z serwerem TTS. Czy jest uruchomiony?" },
-      { status: 503 },
-    );
-  }
+  return NextResponse.json({ status: "generating" });
 }

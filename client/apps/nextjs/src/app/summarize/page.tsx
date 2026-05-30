@@ -85,8 +85,10 @@ export default function SummarizePage() {
   }
 
   async function handleGeneratePodcast(text: string, id?: string) {
-    setPodcast({ status: "loading", message: "Łączenie z serwerem TTS…", logs: [] });
-    startPolling();
+    setPodcast({ status: "loading", message: "Startowanie generowania…", logs: [] });
+
+    // Odpala generowanie w tle na serwerze i natychmiast wraca.
+    // Nawigacja nie przerwie procesu — plik zostanie zapisany niezależnie.
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
@@ -98,15 +100,44 @@ export default function SummarizePage() {
         setPodcast({ status: "error", message: err.error ?? "Błąd TTS" });
         return;
       }
-      const blob = await res.blob();
-      const audioUrl = URL.createObjectURL(blob);
-      stopPolling();
-      setPodcast({ status: "done", url: audioUrl });
-      void loadHistory();
     } catch (err) {
-      stopPolling();
       setPodcast({ status: "error", message: String(err) });
+      return;
     }
+
+    // Polluj status TTS co sekundę; gdy wróci do idle — odśwież historię
+    setPodcast({ status: "loading", message: "Generowanie audio na GPU…", logs: [] });
+    startPolling();
+
+    const pollUntilDone = async () => {
+      for (let i = 0; i < 300; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const s = await fetch("/api/tts-status").then(r => r.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
+          setPodcast(prev => prev.status === "loading"
+            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs }
+            : prev
+          );
+          if (s.state === "idle") {
+            stopPolling();
+            // poczekaj chwilę żeby DB zdążyła się zapisać, potem odśwież historię
+            await new Promise(r => setTimeout(r, 500));
+            const hist = await fetch("/api/history").then(r => r.json()) as { history: HistoryItem[] };
+            const item = id ? hist.history.find(h => h.id === id) : hist.history[0];
+            if (item?.podcastPath) {
+              setHistory(hist.history);
+              setPodcast({ status: "done", url: item.podcastPath });
+            } else {
+              setHistory(hist.history);
+              setPodcast({ status: "error", message: "Nie znaleziono pliku w historii" });
+            }
+            return;
+          }
+        } catch {}
+      }
+      stopPolling();
+    };
+    void pollUntilDone();
   }
 
   function loadFromHistory(item: HistoryItem) {
