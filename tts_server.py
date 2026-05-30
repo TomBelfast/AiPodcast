@@ -81,7 +81,7 @@ def get_tts(model: str = "supertonic-3"):
 
 AVAILABLE_VOICES = ["M1", "M2", "F1", "F2"]
 
-def _do_synthesize(text: str, voice: str, model: str, lang: str = "pl") -> bytes:
+def _do_synthesize(text: str, voice: str, model: str, lang: str = "na") -> bytes:
     _set_status("generating", f"Synteza mowy — {len(text)} znaków, głos {voice}, język {lang}…")
     tts = get_tts(model)
     voice_style = tts.get_voice_style(voice_name=voice)
@@ -156,7 +156,7 @@ class Handler(BaseHTTPRequestHandler):
         text  = (body.get("text") or "").strip()
         voice = body.get("voice", "F1")
         model = body.get("model", "supertonic-3")
-        lang  = body.get("lang", "pl")
+        lang  = body.get("lang", "na")
 
         if not text:
             self.send_json(400, {"error": "text is required"}); return

@@ -50,19 +50,22 @@ async function callLLM(transcript: string): Promise<string> {
       messages: [
         {
           role: "system",
-          content: "Jesteś ekspertem od tworzenia podcastów i podsumowań. Piszesz płynnym, naturalnym językiem polskim.",
+          content: `Jesteś redaktorem encyklopedycznym piszącym po polsku w stylu Wikipedii. Twoje zasady:
+1. Piszesz jasno, zwięźle i neutralnie — tak aby osoba bez wiedzy technicznej rozumiała każde zdanie.
+2. Nazwy własne, marki, technologie i terminy techniczne ZAWSZE zostawiasz w oryginalnej angielskiej formie (np. "Proxmox", "load balancing", "GPU", "Docker", "API"). Nigdy ich nie tłumaczysz ani nie przekształcasz fonetycznie.
+3. Piszesz pełnymi zdaniami, bez list i punktorów — styl narracyjny nadający się do czytania na głos.
+4. Unikasz żargonu — gdy musisz użyć pojęcia technicznego, w nawiasie dodajesz krótkie wyjaśnienie po polsku.`,
         },
         {
           role: "user",
-          content: `Na podstawie poniższego transkryptu napisz obszerne, szczegółowe podsumowanie w języku polskim.
+          content: `Napisz szczegółowe podsumowanie poniższego transkryptu w języku polskim, w stylu artykułu encyklopedycznego.
 
-Uwzględnij:
-- Główny temat i cel wideo
-- Kluczowe punkty i argumenty
-- Ważne fakty, liczby, daty (jeśli są)
-- Wnioski końcowe
+Struktura:
+- Zacznij od jednego zdania wyjaśniającego o czym jest materiał i dlaczego jest istotny.
+- Następnie omów kolejne zagadnienia w logicznej kolejności — każde w osobnym akapicie.
+- Zakończ wnioskami lub praktycznym znaczeniem omawianych treści.
 
-Pisz stylem nadającym się do odsłuchiwania jako podcast — bez list, pełnymi zdaniami.
+Pamiętaj: nazwy angielskie (produkty, technologie, firmy, funkcje) zostaw dokładnie tak jak są w transkrypcie — nie tłumacz ich na polski.
 
 TRANSKRYPT:
 ${transcript}`,
