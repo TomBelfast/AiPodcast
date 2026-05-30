@@ -17,7 +17,7 @@ export async function POST(req: Request) {
     const res = await fetch(`${TTS_URL}/synthesize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice }),
+      body: JSON.stringify({ text, voice, lang: "pl" }),
     });
 
     if (!res.ok) {

@@ -48,10 +48,10 @@ def get_tts(model: str = "supertonic-3"):
 AVAILABLE_VOICES = ["M1", "M2", "F1", "F2"]
 
 
-def _do_synthesize(text: str, voice: str, model: str) -> bytes:
+def _do_synthesize(text: str, voice: str, model: str, lang: str = "pl") -> bytes:
     tts = get_tts(model)
     voice_style = tts.get_voice_style(voice_name=voice)
-    wav, _duration = tts.synthesize(text=text, voice_style=voice_style)
+    wav, _duration = tts.synthesize(text=text, voice_style=voice_style, lang=lang)
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     try:
         tts.save_audio(wav, tmp.name)
@@ -102,8 +102,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         text = (body.get("text") or "").strip()
-        voice = body.get("voice", "M1")
+        voice = body.get("voice", "F1")
         model = body.get("model", "supertonic-3")
+        lang = body.get("lang", "pl")
 
         if not text:
             self.send_json(400, {"error": "text is required"})
@@ -114,8 +115,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            log.info(f"Synthesizing {len(text)} chars, voice={voice}")
-            audio = _do_synthesize(text, voice, model)
+            log.info(f"Synthesizing {len(text)} chars, voice={voice}, lang={lang}")
+            audio = _do_synthesize(text, voice, model, lang)
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(len(audio)))
