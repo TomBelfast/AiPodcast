@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 type SummaryState =
   | { status: "idle" }
@@ -10,7 +10,7 @@ type SummaryState =
 
 type PodcastState =
   | { status: "idle" }
-  | { status: "loading" }
+  | { status: "loading"; message: string; elapsed?: number; device?: string; logs: string[] }
   | { status: "done"; url: string }
   | { status: "error"; message: string };
 
@@ -30,8 +30,28 @@ export default function SummarizePage() {
   const [podcast, setPodcast] = useState<PodcastState>({ status: "idle" });
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { void loadHistory(); }, []);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }, []);
+
+  const startPolling = useCallback(() => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch("/api/tts-status");
+        const s = (await res.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
+        if (s.state === "idle" || s.state === "saving") return; // generatePodcast will handle final state
+        setPodcast(prev => {
+          if (prev.status !== "loading") return prev;
+          return { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs };
+        });
+      } catch {}
+    }, 1000);
+  }, [stopPolling]);
 
   async function loadHistory() {
     try {
@@ -65,7 +85,8 @@ export default function SummarizePage() {
   }
 
   async function handleGeneratePodcast(text: string, id?: string) {
-    setPodcast({ status: "loading" });
+    setPodcast({ status: "loading", message: "Łączenie z serwerem TTS…", logs: [] });
+    startPolling();
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
@@ -79,9 +100,11 @@ export default function SummarizePage() {
       }
       const blob = await res.blob();
       const audioUrl = URL.createObjectURL(blob);
+      stopPolling();
       setPodcast({ status: "done", url: audioUrl });
       void loadHistory();
     } catch (err) {
+      stopPolling();
       setPodcast({ status: "error", message: String(err) });
     }
   }
@@ -201,9 +224,29 @@ export default function SummarizePage() {
                   disabled={podcast.status === "loading"}
                   className="bg-secondary text-secondary-foreground hover:bg-secondary/80 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
                 >
-                  {podcast.status === "loading" ? "Generuję podcast…" : "🎙 Generuj podcast"}
+                  {podcast.status === "loading" ? "⏳ Generuję…" : "🎙 Generuj podcast"}
                 </button>
               </div>
+
+              {podcast.status === "loading" && (
+                <div className="bg-muted rounded-lg border p-4 font-mono text-xs space-y-1">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground mb-2">
+                    <span className="animate-pulse">⚙️</span>
+                    <span>{podcast.message}</span>
+                    {podcast.elapsed && (
+                      <span className="text-muted-foreground ml-auto">{podcast.elapsed}s</span>
+                    )}
+                    {podcast.device && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${podcast.device === "GPU" ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400"}`}>
+                        {podcast.device}
+                      </span>
+                    )}
+                  </div>
+                  {podcast.logs.map((line, i) => (
+                    <div key={i} className="text-muted-foreground">{line}</div>
+                  ))}
+                </div>
+              )}
 
               {podcast.status === "error" && (
                 <div className="rounded-md border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
