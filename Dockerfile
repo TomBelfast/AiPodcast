@@ -1,6 +1,9 @@
+# CUDA-enabled base so onnxruntime-gpu and supertonic can use the GPU.
+# Uses node:22-slim as final stage to keep the image lean while still
+# having CUDA driver libraries available at runtime via --gpus all.
 FROM node:22-slim
 
-# Install system dependencies: PostgreSQL + Python for TTS server
+# System deps: PostgreSQL + Python + CUDA runtime libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
@@ -9,7 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-dev \
-    python3-venv \
     build-essential \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
@@ -25,21 +27,28 @@ COPY . .
 # Ensure entrypoint script is executable
 RUN chmod +x /app/entrypoint.sh
 
-# Install Python TTS dependencies (supertonic)
-RUN pip3 install --break-system-packages supertonic>=1.3.1
+# Install Python TTS dependencies.
+# onnxruntime-gpu uses CUDAExecutionProvider when --gpus all is passed
+# at docker run time (driver libs are injected by NVIDIA Container Toolkit).
+RUN pip3 install --break-system-packages \
+    "supertonic>=1.3.1" \
+    "onnxruntime-gpu>=1.19"
 
 # Go to client workspace
 WORKDIR /app/client
 
-# Configure environment defaults
-RUN cp .env.example .env
+# Copy .env.example as .env only if .env does not already exist.
+# This preserves keys set via -e flags or a mounted .env volume.
+RUN if [ ! -f .env ]; then cp .env.example .env; fi
 
-# Install Node dependencies for the workspace
+# Install Node dependencies
 RUN pnpm install
 
-# Expose Next.js port and TTS server port
+# Persist podcasts across container restarts when using a named volume
+VOLUME ["/app/podcasts"]
+
+# Next.js | TTS server
 EXPOSE 3001
 EXPOSE 8765
 
-# Execute PostgreSQL initialization, Drizzle migrations, and start all services
 ENTRYPOINT ["/app/entrypoint.sh"]

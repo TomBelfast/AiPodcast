@@ -5,7 +5,17 @@ import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
 
-const TTS_URL = process.env.TTS_SERVER_URL ?? "http://localhost:8765";
+function getTtsUrl(): string {
+  if (process.env.TTS_SERVER_URL) return process.env.TTS_SERVER_URL;
+  try {
+    const p = path.resolve(process.cwd(), "../../.env");
+    for (const line of fs.readFileSync(p, "utf8").split("\n")) {
+      const m = line.match(/^TTS_SERVER_URL=['"]?(.+?)['"]?\s*$/);
+      if (m) return m[1]!;
+    }
+  } catch {}
+  return "http://localhost:8765";
+}
 const PODCASTS_DIR = "/app/podcasts";
 
 function ensurePodcastsDir() {
@@ -25,7 +35,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const res = await fetch(`${TTS_URL}/synthesize`, {
+    const res = await fetch(`${getTtsUrl()}/synthesize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, voice, lang: "pl" }),
