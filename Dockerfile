@@ -7,6 +7,8 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
+    wget \
+    gnupg \
     postgresql \
     postgresql-contrib \
     python3 \
@@ -14,6 +16,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     build-essential \
     libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add NVIDIA CUDA apt repo and install runtime libs needed by onnxruntime-gpu
+RUN wget -qO /tmp/cuda-keyring.deb \
+    https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    cuda-cudart-12-8 \
+    libcublas-12-8 \
+    libcufft-12-8 \
+    libcurand-12-8 \
+    libcusparse-12-8 \
+    libcudnn9-cuda-12 \
+    && ldconfig \
     && rm -rf /var/lib/apt/lists/*
 
 # Install pnpm
