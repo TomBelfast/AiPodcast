@@ -1,19 +1,38 @@
+import fs from "fs";
+import path from "path";
 import { NextResponse } from "next/server";
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
+function readEnvFile(): Record<string, string> {
+  try {
+    const envPath = path.resolve(process.cwd(), "../../.env");
+    const lines = fs.readFileSync(envPath, "utf8").split("\n");
+    const out: Record<string, string> = {};
+    for (const line of lines) {
+      const m = line.match(/^([A-Z_]+)=['"]?(.+?)['"]?\s*$/);
+      if (m) out[m[1]!] = m[2]!;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
 
-// Supports multiple keys separated by commas — falls back on 429
-const GEMINI_KEYS = (process.env.GEMINI_API_KEY ?? "")
-  .split(",")
-  .map((k) => k.trim())
-  .filter(Boolean);
+function getKeys(): string[] {
+  const fromEnv = process.env.GEMINI_API_KEY ?? "";
+  const keys = fromEnv || readEnvFile().GEMINI_API_KEY || "";
+  return keys.split(",").map((k) => k.trim()).filter(Boolean);
+}
+
+function getModel(): string {
+  return process.env.GEMINI_MODEL || readEnvFile().GEMINI_MODEL || "gemini-2.0-flash";
+}
 
 type GeminiResult =
   | { ok: true; text: string }
   | { ok: false; status: number; body: string };
 
 async function callGemini(key: string, payload: unknown): Promise<GeminiResult> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${getModel()}:generateContent?key=${key}`;
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -35,6 +54,7 @@ async function callGemini(key: string, payload: unknown): Promise<GeminiResult> 
 }
 
 export async function POST(req: Request) {
+  const GEMINI_KEYS = getKeys();
   if (GEMINI_KEYS.length === 0) {
     return NextResponse.json({ error: "GEMINI_API_KEY nie jest skonfigurowany" }, { status: 503 });
   }
