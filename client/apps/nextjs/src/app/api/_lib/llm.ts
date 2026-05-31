@@ -20,6 +20,25 @@ export function cfg(key: string, fallback = ""): string {
   return process.env[key] || readEnv()[key] || fallback;
 }
 
+const LLM_SETTINGS_PATH = "/app/llm-settings.json";
+
+export function readLlmSettings(): { model: string } {
+  try {
+    return JSON.parse(fs.readFileSync(LLM_SETTINGS_PATH, "utf8")) as { model: string };
+  } catch {
+    return { model: "" };
+  }
+}
+
+export function writeLlmSettings(s: { model: string }): void {
+  fs.writeFileSync(LLM_SETTINGS_PATH, JSON.stringify(s, null, 2));
+}
+
+/** Wybrany model LLM: ustawienie z pliku → .env → domyślny. */
+export function getModel(): string {
+  return readLlmSettings().model || cfg("LLM_MODEL", "gemini-2.5-flash");
+}
+
 /** Wywołanie LLM (OpenAI-compatible chat/completions). */
 export async function callLLM(
   messages: { role: string; content: string }[],
@@ -27,7 +46,7 @@ export async function callLLM(
 ): Promise<string> {
   const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
   const apiKey = cfg("LLM_API_KEY");
-  const model = cfg("LLM_MODEL", "gemini-2.5-flash");
+  const model = getModel();
 
   if (!cfg("LLM_API_URL") || !apiKey) {
     throw new Error("LLM_API_URL i LLM_API_KEY muszą być skonfigurowane w .env");

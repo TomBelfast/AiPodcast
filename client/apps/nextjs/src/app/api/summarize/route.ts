@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { getPrompt } from "../_lib/prompts";
+import { getModel } from "../_lib/llm";
 
 function readEnv(): Record<string, string> {
   try {
@@ -47,7 +48,7 @@ async function fetchTranscript(videoUrl: string): Promise<{ text: string; title:
 async function callLLM(transcript: string, style: string): Promise<string> {
   const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
   const apiKey = cfg("LLM_API_KEY");
-  const model  = cfg("LLM_MODEL", "gemini-2.5-flash");
+  const model  = getModel();
 
   if (!cfg("LLM_API_URL") || !apiKey) {
     throw new Error("LLM_API_URL i LLM_API_KEY muszą być skonfigurowane w .env");

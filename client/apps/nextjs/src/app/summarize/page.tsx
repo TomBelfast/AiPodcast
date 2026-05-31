@@ -51,6 +51,26 @@ export default function SummarizePage() {
   // token anulowania aktywnego pollera (zamiast setInterval — jeden, kontrolowany)
   const pollRef = useRef<{ cancelled: boolean } | null>(null);
 
+  // wybór modelu LLM
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModel] = useState<string>("");
+
+  useEffect(() => {
+    void fetch("/api/models").then(r => r.json()).then((d: { models: string[] }) => setModels(d.models ?? [])).catch(() => {});
+    void fetch("/api/llm-settings").then(r => r.json()).then((d: { model: string }) => setModel(d.model ?? "")).catch(() => {});
+  }, []);
+
+  async function changeModel(m: string) {
+    setModel(m);
+    try {
+      await fetch("/api/llm-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: m }),
+      });
+    } catch {}
+  }
+
   // edytor promptów
   const [promptEditor, setPromptEditor] = useState<{
     style: StyleId; system: string; user: string; isCustom: boolean; saving: boolean;
@@ -346,6 +366,20 @@ export default function SummarizePage() {
             >
               🎚 Playground głosów
             </Link>
+          </div>
+
+          {/* Model LLM */}
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-muted-foreground shrink-0">🧠 Model:</label>
+            <select
+              value={model}
+              onChange={(e) => changeModel(e.target.value)}
+              className="border-input bg-background h-9 rounded-md border px-2 text-sm max-w-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {model && !models.includes(model) && <option value={model}>{model}</option>}
+              {models.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <span className="text-xs text-muted-foreground">({models.length} dostępnych)</span>
           </div>
 
           {/* Styl podsumowania */}

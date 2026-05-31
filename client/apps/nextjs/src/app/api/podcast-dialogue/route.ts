@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
-import { cfg, readEnv } from "../_lib/llm";
+import { cfg, readEnv, getModel } from "../_lib/llm";
 import { readSettings } from "../_lib/settings";
 import { buildDialoguePrompt, readDialogue, type Host } from "../_lib/dialogue";
 import { wavToMp3 } from "../_lib/audio";
@@ -36,7 +36,7 @@ function parseDialogue(raw: string, hostA: Host, hostB: Host): Segment[] {
 async function generateDialogueScript(summaryText: string): Promise<Segment[]> {
   const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
   const apiKey = cfg("LLM_API_KEY");
-  const model  = cfg("LLM_MODEL", "gemini-2.5-flash");
+  const model  = getModel();
   const d = readDialogue();
   const { system, user, hostA, hostB } = buildDialoguePrompt(summaryText);
 
