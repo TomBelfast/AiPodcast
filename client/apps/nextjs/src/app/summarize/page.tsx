@@ -19,7 +19,7 @@ function styleLabel(id: string) {
 type SummaryState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "done"; text: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string }
+  | { status: "done"; text: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string; transcript?: string }
   | { status: "error"; message: string };
 
 type PodcastState =
@@ -33,6 +33,7 @@ interface HistoryItem {
   youtubeUrl: string;
   title: string;
   summaryText: string;
+  transcript: string;
   podcastPath: string | null;
   summaryStyle: string;
   createdAt: string;
@@ -153,11 +154,11 @@ export default function SummarizePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim(), summaryStyle }),
       });
-      const data = (await res.json()) as { summary?: string; id?: string; title?: string; youtubeUrl?: string; error?: string };
+      const data = (await res.json()) as { summary?: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string; transcript?: string; error?: string };
       if (!res.ok || data.error) {
         setSummary({ status: "error", message: data.error ?? "Nieznany błąd" });
       } else {
-        setSummary({ status: "done", text: data.summary ?? "", id: data.id, title: data.title, youtubeUrl: data.youtubeUrl, summaryStyle: data.summaryStyle });
+        setSummary({ status: "done", text: data.summary ?? "", id: data.id, title: data.title, youtubeUrl: data.youtubeUrl, summaryStyle: data.summaryStyle, transcript: data.transcript });
         void loadHistory();
       }
     } catch (err) {
@@ -205,7 +206,7 @@ export default function SummarizePage() {
     cancelPoll();
     setUrl(item.youtubeUrl);
     setSummaryStyle((item.summaryStyle as StyleId) ?? "encyclopedic");
-    setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl, summaryStyle: item.summaryStyle });
+    setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl, summaryStyle: item.summaryStyle, transcript: item.transcript });
     if (item.podcastPath) {
       setPodcast({ status: "done", url: item.podcastPath });
     } else {
@@ -320,13 +321,35 @@ export default function SummarizePage() {
 
           {activeSummary && (
             <div className="space-y-4">
+              {/* 1) Transkrypt — zwinięty domyślnie */}
+              {activeSummary.transcript && (
+                <details className="bg-card rounded-lg border group">
+                  <summary className="cursor-pointer select-none px-5 py-3 text-sm font-semibold flex items-center gap-2 list-none">
+                    <span className="transition-transform group-open:rotate-90">▶</span>
+                    <span>📄 Transkrypt</span>
+                    <span className="text-xs font-normal text-muted-foreground ml-1">
+                      ({activeSummary.transcript.length} znaków — kliknij aby rozwinąć)
+                    </span>
+                  </summary>
+                  <div className="px-5 pb-5 max-h-96 overflow-y-auto whitespace-pre-wrap text-sm leading-7 text-muted-foreground border-t border-border pt-3">
+                    {activeSummary.transcript}
+                  </div>
+                </details>
+              )}
+
+              {/* 2) Podsumowanie */}
               <div className="bg-card rounded-lg border p-5">
                 <div className="flex items-start justify-between gap-3 mb-3">
                   <div>
                     {activeSummary.title && (
                       <p className="text-xs text-muted-foreground mb-1">{activeSummary.title}</p>
                     )}
-                    <h2 className="text-lg font-semibold">Podsumowanie</h2>
+                    <h2 className="text-lg font-semibold flex items-center gap-2">
+                      📝 Podsumowanie
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {styleLabel(activeSummary.summaryStyle ?? "encyclopedic")}
+                      </span>
+                    </h2>
                   </div>
                   {activeSummary.youtubeUrl && (
                     <a
@@ -344,11 +367,11 @@ export default function SummarizePage() {
                 </div>
               </div>
 
-              {/* Generowanie audio (podcast) */}
-              <div className="border-t border-border pt-4">
-                <p className="text-sm font-semibold mb-1">🔊 Wygeneruj audio z tego podsumowania</p>
+              {/* 3) Podcast */}
+              <div className="bg-card rounded-lg border p-5">
+                <p className="text-lg font-semibold mb-1">🔊 Podcast</p>
                 <p className="text-xs text-muted-foreground mb-3">
-                  Powyższy tekst zamienimy na mowę. Wybierz wariant — gotowe audio pojawi się poniżej i w historii (🎙).
+                  Zamień powyższe podsumowanie na mowę. Wybierz wariant — gotowe audio pojawi się poniżej i w historii (🎙).
                 </p>
                 <div className="flex items-center gap-3 flex-wrap">
                   <select

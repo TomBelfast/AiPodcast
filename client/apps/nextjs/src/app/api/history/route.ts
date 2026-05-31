@@ -11,6 +11,7 @@ export async function GET() {
         youtubeUrl: summary.youtubeUrl,
         title: summary.title,
         summaryText: summary.summaryText,
+        transcript: summary.transcript,
         podcastPath: summary.podcastPath,
         summaryStyle: summary.summaryStyle,
         createdAt: summary.createdAt,

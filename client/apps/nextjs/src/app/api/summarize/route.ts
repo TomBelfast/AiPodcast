@@ -144,7 +144,7 @@ export async function POST(req: Request) {
       summaryStyle,
     }).returning({ id: summary.id });
 
-    return NextResponse.json({ summary: summaryText, id: saved?.id, title, youtubeUrl: videoUrl, summaryStyle });
+    return NextResponse.json({ summary: summaryText, id: saved?.id, title, youtubeUrl: videoUrl, summaryStyle, transcript });
   } catch (err) {
     console.error("[summarize]", err);
     const msg = err instanceof Error ? err.message : String(err);
