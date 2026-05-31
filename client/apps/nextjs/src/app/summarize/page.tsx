@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import Link from "next/link";
 
 const STYLES = [
   { id: "encyclopedic", label: "📖 Wikipedia",       desc: "Encyklopedyczny, szczegółowy" },
@@ -267,11 +268,19 @@ export default function SummarizePage() {
       {/* Główna treść */}
       <main className="flex-1 px-6 py-12 overflow-y-auto">
         <div className="mx-auto max-w-2xl space-y-8">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">OpenBrief — Podsumuj wideo</h1>
-            <p className="text-muted-foreground mt-1 text-sm">
-              Wklej link do YouTube, wygeneruj podsumowanie i podcast.
-            </p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h1 className="text-3xl font-bold tracking-tight">OpenBrief — Podsumuj wideo</h1>
+              <p className="text-muted-foreground mt-1 text-sm">
+                Wklej link do YouTube, wygeneruj podsumowanie i podcast.
+              </p>
+            </div>
+            <Link
+              href="/playground"
+              className="shrink-0 inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted transition-colors"
+            >
+              🎚 Playground głosów
+            </Link>
           </div>
 
           {/* Styl podsumowania */}

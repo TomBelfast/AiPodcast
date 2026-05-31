@@ -86,7 +86,7 @@ def get_tts(model: str = "supertonic-3"):
             _set_status("idle", f"Model załadowany ({device})")
         return _tts_instance
 
-AVAILABLE_VOICES = ["M1", "M2", "F1", "F2"]
+AVAILABLE_VOICES = ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"]
 
 # Jakość syntezy — liczba kroków dyfuzji. Domyślny supertonic to 8 (szybko,
 # niższa jakość). Na GPU 32 kroki = ~17x realtime, praktycznie maks. jakość.
@@ -125,7 +125,7 @@ def _array_to_wav(arr, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 def _do_synthesize_dialogue(segments: list, voices: dict, model: str = "supertonic-3",
-                            steps: int = QUALITY_STEPS) -> bytes:
+                            steps: int = QUALITY_STEPS, speed: float = 1.05) -> bytes:
     """
     Generuje audio dla listy {speaker, text}, skleja w jeden WAV.
     voices: {"ania": "F1", "marek": "M1"}
@@ -145,7 +145,7 @@ def _do_synthesize_dialogue(segments: list, voices: dict, model: str = "superton
         voice_name = voices.get(speaker) or DEFAULT_HOST_VOICES.get(speaker, "F1")
         _set_status("generating", f"Segment {i+1}/{total} — {speaker} ({voice_name}): {text[:50]}…")
         voice_style = tts.get_voice_style(voice_name=voice_name)
-        wav, _ = tts.synthesize(text=text, voice_style=voice_style, lang="na", total_steps=steps)
+        wav, _ = tts.synthesize(text=text, voice_style=voice_style, lang="na", total_steps=steps, speed=speed)
         # wav shape: (1, samples) — flatten to 1D
         arr = wav[0] if hasattr(wav, '__len__') and len(wav.shape) > 1 else wav
         arrays.append(arr.astype(np.float32))
@@ -162,8 +162,8 @@ def _do_synthesize_dialogue(segments: list, voices: dict, model: str = "superton
     return result
 
 def _do_synthesize(text: str, voice: str, model: str, lang: str = "na",
-                   steps: int = QUALITY_STEPS) -> bytes:
-    _set_status("generating", f"Synteza mowy — {len(text)} znaków, głos {voice}, język {lang}, jakość {steps} kroków…")
+                   steps: int = QUALITY_STEPS, speed: float = 1.05) -> bytes:
+    _set_status("generating", f"Synteza mowy — {len(text)} znaków, głos {voice}, język {lang}, jakość {steps} kroków, tempo {speed}…")
     tts = get_tts(model)
     voice_style = tts.get_voice_style(voice_name=voice)
 
@@ -172,7 +172,7 @@ def _do_synthesize(text: str, voice: str, model: str, lang: str = "na",
     n_chunks = max(1, (len(text) + chunk_len - 1) // chunk_len)
     _set_status("generating", f"Generowanie audio ({n_chunks} fragmentów, {steps} kroków jakości)…")
 
-    wav, duration = tts.synthesize(text=text, voice_style=voice_style, lang=lang, total_steps=steps)
+    wav, duration = tts.synthesize(text=text, voice_style=voice_style, lang=lang, total_steps=steps, speed=speed)
 
     _set_status("saving", "Zapisywanie pliku WAV…")
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -248,12 +248,13 @@ class Handler(BaseHTTPRequestHandler):
             model = body.get("model", "supertonic-3")
             lang  = body.get("lang", "na")
             steps = int(body.get("steps") or QUALITY_STEPS)
+            speed = float(body.get("speed") or 1.05)
             if not text:
                 self.send_json(400, {"error": "text is required"}); return
             if voice not in AVAILABLE_VOICES:
                 self.send_json(400, {"error": f"voice must be one of {AVAILABLE_VOICES}"}); return
             try:
-                self._send_audio(_do_synthesize(text, voice, model, lang, steps))
+                self._send_audio(_do_synthesize(text, voice, model, lang, steps, speed))
             except Exception as e:
                 log.exception("synthesize failed")
                 _set_status("idle", f"Błąd: {e}")
@@ -266,10 +267,11 @@ class Handler(BaseHTTPRequestHandler):
             voices   = {**DEFAULT_HOST_VOICES, **voices}
             model    = body.get("model", "supertonic-3")
             steps    = int(body.get("steps") or QUALITY_STEPS)
+            speed    = float(body.get("speed") or 1.05)
             if not segments:
                 self.send_json(400, {"error": "segments is required"}); return
             try:
-                self._send_audio(_do_synthesize_dialogue(segments, voices, model, steps))
+                self._send_audio(_do_synthesize_dialogue(segments, voices, model, steps, speed))
             except Exception as e:
                 log.exception("podcast failed")
                 _set_status("idle", f"Błąd: {e}")
