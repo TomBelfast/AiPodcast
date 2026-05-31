@@ -6,6 +6,7 @@ import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
 import { phoneticizeForTTS } from "../_lib/llm";
 import { readSettings } from "../_lib/settings";
+import { wavToMp3 } from "../_lib/audio";
 
 function getTtsUrl(): string {
   if (process.env.TTS_SERVER_URL) return process.env.TTS_SERVER_URL;
@@ -49,17 +50,22 @@ async function generateInBackground(text: string, gender: "female" | "male", sum
       return;
     }
 
-    const audio = Buffer.from(await res.arrayBuffer());
+    const wav = Buffer.from(await res.arrayBuffer());
+    const mp3 = await wavToMp3(wav).catch((e) => {
+      console.warn("[tts bg] mp3 conversion failed, falling back to wav:", e);
+      return null;
+    });
 
     if (summaryId) {
       ensurePodcastsDir();
-      const filename = `podcast_${summaryId}.wav`;
+      const ext = mp3 ? "mp3" : "wav";
+      const filename = `podcast_${summaryId}.${ext}`;
       const filepath = path.join(PODCASTS_DIR, filename);
-      fs.writeFileSync(filepath, audio);
+      fs.writeFileSync(filepath, mp3 ?? wav);
       await db.update(summary)
         .set({ podcastPath: `/api/podcast/${filename}` })
         .where(eq(summary.id, summaryId));
-      console.log(`[tts bg] saved ${filepath}`);
+      console.log(`[tts bg] saved ${filepath} (${(mp3 ?? wav).length} B)`);
     }
   } catch (err) {
     console.error("[tts bg] failed:", err);

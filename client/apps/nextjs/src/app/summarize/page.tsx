@@ -56,6 +56,37 @@ export default function SummarizePage() {
     style: StyleId; system: string; user: string; isCustom: boolean; saving: boolean;
   } | null>(null);
 
+  // edytor ustawień dialogu
+  interface DialogueCfg {
+    hostA: { name: string; gender: "female" | "male"; personality: string };
+    hostB: { name: string; gender: "female" | "male"; personality: string };
+    minExchanges: number; maxExchanges: number; temperature: number;
+  }
+  const [dialogueEditor, setDialogueEditor] = useState<(DialogueCfg & { saving: boolean }) | null>(null);
+
+  async function openDialogueEditor() {
+    try {
+      const d = await fetch("/api/dialogue-settings").then(r => r.json()) as DialogueCfg;
+      setDialogueEditor({ ...d, saving: false });
+    } catch {}
+  }
+
+  async function saveDialogue(reset = false) {
+    if (!dialogueEditor) return;
+    setDialogueEditor({ ...dialogueEditor, saving: true });
+    try {
+      const { saving, ...cfg } = dialogueEditor;
+      await fetch("/api/dialogue-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reset ? { reset: true } : cfg),
+      });
+      setDialogueEditor(null);
+    } catch {
+      setDialogueEditor({ ...dialogueEditor, saving: false });
+    }
+  }
+
   async function openPromptEditor(style: StyleId) {
     try {
       const { prompts } = await fetch("/api/prompts").then(r => r.json()) as {
@@ -456,13 +487,23 @@ export default function SummarizePage() {
                     {podcast.status === "loading" ? "⏳ Generuję…" : "🎙 Monolog (1 głos)"}
                   </button>
 
-                  <button
-                    onClick={() => handleGenerateDialogue(activeSummary.text, activeSummary.id)}
-                    disabled={podcast.status === "loading"}
-                    className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
-                  >
-                    {podcast.status === "loading" ? "⏳ Generuję…" : "🎭 Dialog (Ania + Marek)"}
-                  </button>
+                  <div className="inline-flex rounded-md overflow-hidden">
+                    <button
+                      onClick={() => handleGenerateDialogue(activeSummary.text, activeSummary.id)}
+                      disabled={podcast.status === "loading"}
+                      className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-l-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+                    >
+                      {podcast.status === "loading" ? "⏳ Generuję…" : "🎭 Dialog"}
+                    </button>
+                    <button
+                      onClick={openDialogueEditor}
+                      disabled={podcast.status === "loading"}
+                      title="Ustawienia dialogu (hości, liczba wymian…)"
+                      className="bg-primary/80 text-primary-foreground hover:bg-primary inline-flex h-10 items-center rounded-r-md px-2 border-l border-primary-foreground/20 disabled:opacity-50"
+                    >
+                      ⚙️
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -498,10 +539,10 @@ export default function SummarizePage() {
                   <audio ref={audioRef} controls src={podcast.url} className="w-full" />
                   <a
                     href={podcast.url}
-                    download="podcast.wav"
+                    download={podcast.url.includes(".wav") ? "podcast.wav" : "podcast.mp3"}
                     className="text-primary mt-2 inline-block text-sm underline underline-offset-2"
                   >
-                    Pobierz WAV
+                    Pobierz plik audio
                   </a>
                 </div>
               )}
@@ -577,6 +618,96 @@ export default function SummarizePage() {
                   className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 text-sm font-medium disabled:opacity-50"
                 >
                   {promptEditor.saving ? "Zapisuję…" : "💾 Zapisz"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal ustawień dialogu */}
+      {dialogueEditor && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => !dialogueEditor.saving && setDialogueEditor(null)}
+        >
+          <div
+            className="bg-background rounded-lg border shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">🎭 Ustawienia dialogu</h3>
+              <button onClick={() => setDialogueEditor(null)} className="text-muted-foreground hover:text-foreground">✕</button>
+            </div>
+
+            {(["hostA", "hostB"] as const).map((key, idx) => {
+              const h = dialogueEditor[key];
+              return (
+                <div key={key} className="rounded-md border p-3 space-y-2">
+                  <p className="text-sm font-medium">{idx === 0 ? "Host 1" : "Host 2"}</p>
+                  <div className="flex gap-2">
+                    <input
+                      value={h.name}
+                      onChange={(e) => setDialogueEditor({ ...dialogueEditor, [key]: { ...h, name: e.target.value } })}
+                      placeholder="Imię"
+                      className="border-input bg-background h-10 rounded-md border px-3 text-sm w-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    />
+                    <div className="inline-flex rounded-md border overflow-hidden">
+                      <button
+                        onClick={() => setDialogueEditor({ ...dialogueEditor, [key]: { ...h, gender: "female" } })}
+                        className={`px-3 h-10 text-sm ${h.gender === "female" ? "bg-primary text-primary-foreground" : "bg-background hover:bg-muted"}`}
+                      >👩 Kobiecy</button>
+                      <button
+                        onClick={() => setDialogueEditor({ ...dialogueEditor, [key]: { ...h, gender: "male" } })}
+                        className={`px-3 h-10 text-sm border-l ${h.gender === "male" ? "bg-primary text-primary-foreground" : "bg-background hover:bg-muted"}`}
+                      >👨 Męski</button>
+                    </div>
+                  </div>
+                  <textarea
+                    value={h.personality}
+                    onChange={(e) => setDialogueEditor({ ...dialogueEditor, [key]: { ...h, personality: e.target.value } })}
+                    rows={2}
+                    placeholder="Charakter / osobowość"
+                    className="border-input bg-background w-full rounded-md border px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none"
+                  />
+                </div>
+              );
+            })}
+
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="text-xs font-medium block mb-1">Min wymian</label>
+                <input type="number" min={2} max={40} value={dialogueEditor.minExchanges}
+                  onChange={(e) => setDialogueEditor({ ...dialogueEditor, minExchanges: parseInt(e.target.value) || 8 })}
+                  className="border-input bg-background h-10 rounded-md border px-3 text-sm w-full" />
+              </div>
+              <div>
+                <label className="text-xs font-medium block mb-1">Max wymian</label>
+                <input type="number" min={2} max={60} value={dialogueEditor.maxExchanges}
+                  onChange={(e) => setDialogueEditor({ ...dialogueEditor, maxExchanges: parseInt(e.target.value) || 20 })}
+                  className="border-input bg-background h-10 rounded-md border px-3 text-sm w-full" />
+              </div>
+              <div>
+                <label className="text-xs font-medium block mb-1">Kreatywność {dialogueEditor.temperature.toFixed(2)}</label>
+                <input type="range" min={0.1} max={1.2} step={0.05} value={dialogueEditor.temperature}
+                  onChange={(e) => setDialogueEditor({ ...dialogueEditor, temperature: parseFloat(e.target.value) })}
+                  className="w-full mt-2" />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <button onClick={() => saveDialogue(true)} disabled={dialogueEditor.saving}
+                className="text-sm text-muted-foreground hover:text-destructive underline underline-offset-2 disabled:opacity-50">
+                Przywróć domyślne
+              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setDialogueEditor(null)} disabled={dialogueEditor.saving}
+                  className="inline-flex h-10 items-center rounded-md border px-4 text-sm font-medium hover:bg-muted disabled:opacity-50">
+                  Anuluj
+                </button>
+                <button onClick={() => saveDialogue(false)} disabled={dialogueEditor.saving}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 text-sm font-medium disabled:opacity-50">
+                  {dialogueEditor.saving ? "Zapisuję…" : "💾 Zapisz"}
                 </button>
               </div>
             </div>

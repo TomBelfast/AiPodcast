@@ -4,40 +4,29 @@ import { NextResponse } from "next/server";
 import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
-import { cfg, readEnv, PHONETIC_RULE } from "../_lib/llm";
+import { cfg, readEnv } from "../_lib/llm";
 import { readSettings } from "../_lib/settings";
+import { buildDialoguePrompt, readDialogue, type Host } from "../_lib/dialogue";
+import { wavToMp3 } from "../_lib/audio";
 
 function getTtsUrl() {
   return process.env.TTS_SERVER_URL || readEnv().TTS_SERVER_URL || "http://localhost:8765";
 }
 
-const DIALOGUE_SYSTEM = `Jesteś scenarzystą podcastów. Tworzysz naturalne, wciągające dialogi po polsku między dwójką prowadzących:
-- Ania: entuzjastyczna, opowiada anegdoty, odnosi do codziennego życia, czasem przerywa z podekscytowaniem
-- Marek: analityczny, zadaje pytania wyjaśniające, robi odniesienia do popkultury, czasem kończy zdania Ani
-
-Zasady:
-1. Dialogi mają brzmieć naturalnie — używaj "no właśnie", "wiesz co", "dokładnie", "serio?", "kurde"
-2. Format WYŁĄCZNIE: "Ania: tekst" lub "Marek: tekst" — każda kwestia w nowej linii
-3. Minimum 8, maksimum 20 wymian
-4. Zacznij od Ani witającej słuchaczy i zapowiadającej temat
-
-${PHONETIC_RULE}`;
-
-const DIALOGUE_USER = (summaryText: string) => `Na podstawie poniższego podsumowania utwórz skrypt podcastu jako dialog Ani i Marka.
-Zachowaj wszystkie ważne informacje z podsumowania — zamień je w naturalną rozmowę.
-
-PODSUMOWANIE:
-${summaryText}`;
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 interface Segment { speaker: string; text: string; }
 
-function parseDialogue(raw: string): Segment[] {
+function parseDialogue(raw: string, hostA: Host, hostB: Host): Segment[] {
+  const re = new RegExp(`^(${escapeRegex(hostA.name)}|${escapeRegex(hostB.name)})\\s*:\\s*(.+)$`, "i");
   return raw
     .split("\n")
     .map(l => l.trim())
     .filter(Boolean)
     .map(l => {
-      const m = l.match(/^(Ania|Marek)\s*:\s*(.+)$/i);
+      const m = l.match(re);
       if (!m) return null;
       return { speaker: m[1]!.toLowerCase(), text: m[2]!.trim() };
     })
@@ -48,6 +37,8 @@ async function generateDialogueScript(summaryText: string): Promise<Segment[]> {
   const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
   const apiKey = cfg("LLM_API_KEY");
   const model  = cfg("LLM_MODEL", "gemini-2.5-flash");
+  const d = readDialogue();
+  const { system, user, hostA, hostB } = buildDialoguePrompt(summaryText);
 
   const res = await fetch(apiUrl, {
     method: "POST",
@@ -55,10 +46,10 @@ async function generateDialogueScript(summaryText: string): Promise<Segment[]> {
     body: JSON.stringify({
       model,
       messages: [
-        { role: "system", content: DIALOGUE_SYSTEM },
-        { role: "user",   content: DIALOGUE_USER(summaryText) },
+        { role: "system", content: system },
+        { role: "user",   content: user },
       ],
-      temperature: 0.75,
+      temperature: d.temperature,
       max_tokens: 3000,
     }),
   });
@@ -66,7 +57,7 @@ async function generateDialogueScript(summaryText: string): Promise<Segment[]> {
   if (!res.ok) throw new Error(`LLM error ${res.status}`);
   const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const raw = data.choices?.[0]?.message?.content ?? "";
-  const segments = parseDialogue(raw);
+  const segments = parseDialogue(raw, hostA, hostB);
   if (segments.length < 2) throw new Error(`Za mało linii dialogu (${segments.length}). Raw:\n${raw.slice(0, 300)}`);
   return segments;
 }
@@ -75,13 +66,18 @@ const PODCASTS_DIR = "/app/podcasts";
 
 async function generateDialogueAudio(segments: Segment[]): Promise<Buffer> {
   const s = readSettings();
+  const d = readDialogue();
+  // host A/B → preset głosu wg płci (female/male) z tts-settings
+  const presetFor = (g: "female" | "male") => (g === "male" ? s.male : s.female);
   const res = await fetch(`${getTtsUrl()}/podcast`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       segments,
-      // Ania = preset kobiecy, Marek = preset męski (każdy z własnym tempem/jakością)
-      voices: { ania: s.female, marek: s.male },
+      voices: {
+        [d.hostA.name.toLowerCase()]: presetFor(d.hostA.gender),
+        [d.hostB.name.toLowerCase()]: presetFor(d.hostB.gender),
+      },
       silence: s.pause,
     }),
   });
@@ -109,15 +105,20 @@ export async function POST(req: Request) {
       console.log("[dialogue] generating script…");
       const segments = await generateDialogueScript(summaryText);
       console.log(`[dialogue] ${segments.length} segments, generating audio…`);
-      const audio = await generateDialogueAudio(segments);
+      const wav = await generateDialogueAudio(segments);
+      const mp3 = await wavToMp3(wav).catch((e) => {
+        console.warn("[dialogue] mp3 conversion failed, falling back to wav:", e);
+        return null;
+      });
       if (summaryId) {
         if (!fs.existsSync(PODCASTS_DIR)) fs.mkdirSync(PODCASTS_DIR, { recursive: true });
-        const filename = `dialogue_${summaryId}.wav`;
-        fs.writeFileSync(path.join(PODCASTS_DIR, filename), audio);
+        const ext = mp3 ? "mp3" : "wav";
+        const filename = `dialogue_${summaryId}.${ext}`;
+        fs.writeFileSync(path.join(PODCASTS_DIR, filename), mp3 ?? wav);
         await db.update(summary)
           .set({ podcastPath: `/api/podcast/${filename}` })
           .where(eq(summary.id, summaryId));
-        console.log(`[dialogue] saved ${filename}`);
+        console.log(`[dialogue] saved ${filename} (${(mp3 ?? wav).length} B)`);
       }
     } catch (err) {
       console.error("[dialogue] failed:", err);

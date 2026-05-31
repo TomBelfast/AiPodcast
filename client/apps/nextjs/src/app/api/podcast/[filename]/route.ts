@@ -8,9 +8,12 @@ export async function GET(
   { params }: { params: Promise<{ filename: string }> },
 ) {
   const { filename } = await params;
-  if (!filename.endsWith(".wav") || filename.includes("..")) {
+  const isWav = filename.endsWith(".wav");
+  const isMp3 = filename.endsWith(".mp3");
+  if ((!isWav && !isMp3) || filename.includes("..")) {
     return new Response("not found", { status: 404 });
   }
+  const contentType = isMp3 ? "audio/mpeg" : "audio/wav";
 
   const filepath = path.join(PODCASTS_DIR, filename);
   let stat: fs.Stats;
@@ -39,7 +42,7 @@ export async function GET(
     return new Response(buf, {
       status: 206,
       headers: {
-        "Content-Type": "audio/wav",
+        "Content-Type": contentType,
         "Content-Range": `bytes ${start}-${end}/${total}`,
         "Accept-Ranges": "bytes",
         "Content-Length": String(chunkSize),
@@ -52,7 +55,7 @@ export async function GET(
   return new Response(audio, {
     status: 200,
     headers: {
-      "Content-Type": "audio/wav",
+      "Content-Type": contentType,
       "Accept-Ranges": "bytes",
       "Content-Length": String(total),
     },
