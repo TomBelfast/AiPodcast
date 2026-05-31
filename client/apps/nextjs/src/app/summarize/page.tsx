@@ -63,7 +63,7 @@ export default function SummarizePage() {
         if (s.state === "idle" || s.state === "saving") return; // generatePodcast will handle final state
         setPodcast(prev => {
           if (prev.status !== "loading") return prev;
-          return { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs };
+          return { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs ?? [] };
         });
       } catch {}
     }, 1000);
