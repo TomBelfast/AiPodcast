@@ -47,6 +47,8 @@ export default function SummarizePage() {
   const [summary, setSummary] = useState<SummaryState>({ status: "idle" });
   const [podcast, setPodcast] = useState<PodcastState>({ status: "idle" });
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   // token anulowania aktywnego pollera (zamiast setInterval — jeden, kontrolowany)
   const pollRef = useRef<{ cancelled: boolean } | null>(null);
@@ -287,6 +289,40 @@ export default function SummarizePage() {
     } catch {}
   }
 
+  function toggleSelect(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelected(prev => prev.size === history.length ? new Set() : new Set(history.map(h => h.id)));
+  }
+
+  async function deleteSelected() {
+    if (selected.size === 0) return;
+    if (!confirm(`Usunąć ${selected.size} ${selected.size === 1 ? "rekord" : "rekordów"} z historii? Tego nie da się cofnąć.`)) return;
+    setDeleting(true);
+    const ids = [...selected];
+    try {
+      await fetch("/api/history", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      // jeśli aktualnie otwarte podsumowanie zostało usunięte — wyczyść widok
+      if (summary.status === "done" && summary.id && ids.includes(summary.id)) {
+        setSummary({ status: "idle" });
+        setPodcast({ status: "idle" });
+      }
+      setSelected(new Set());
+      await loadHistory();
+    } catch {}
+    setDeleting(false);
+  }
+
   async function handleSummarize(e: React.FormEvent) {
     e.preventDefault();
     if (!url.trim()) return;
@@ -381,18 +417,51 @@ export default function SummarizePage() {
     <div className="bg-background min-h-screen flex">
       {/* Historia — panel lewy */}
       <aside className="w-72 border-r border-border flex-shrink-0 overflow-y-auto hidden md:flex flex-col">
-        <div className="p-4 border-b border-border">
+        <div className="p-4 border-b border-border flex items-center justify-between gap-2">
           <h2 className="font-semibold text-sm">Historia podsumowań</h2>
+          {history.length > 0 && (
+            <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={selected.size === history.length && history.length > 0}
+                onChange={toggleSelectAll}
+                className="accent-primary"
+              />
+              wszystkie
+            </label>
+          )}
         </div>
+
+        {selected.size > 0 && (
+          <div className="px-4 py-2 border-b border-border flex items-center justify-between gap-2 bg-muted/40">
+            <span className="text-xs text-muted-foreground">Zaznaczono: {selected.size}</span>
+            <button
+              onClick={deleteSelected}
+              disabled={deleting}
+              className="inline-flex items-center gap-1 rounded-md bg-destructive/10 text-destructive border border-destructive/30 px-2 py-1 text-xs font-medium hover:bg-destructive/20 disabled:opacity-50"
+            >
+              {deleting ? "Usuwam…" : `🗑 Usuń (${selected.size})`}
+            </button>
+          </div>
+        )}
+
         {history.length === 0 ? (
           <p className="text-muted-foreground text-xs p-4">Brak historii</p>
         ) : (
           <ul className="divide-y divide-border">
             {history.map((item) => (
-              <li key={item.id}>
+              <li key={item.id} className={`flex items-start ${selected.has(item.id) ? "bg-primary/5" : ""}`}>
+                <label className="pl-3 pt-3.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.id)}
+                    onChange={() => toggleSelect(item.id)}
+                    className="accent-primary"
+                  />
+                </label>
                 <button
                   onClick={() => loadFromHistory(item)}
-                  className="w-full text-left px-4 py-3 hover:bg-muted/50 transition-colors"
+                  className="flex-1 min-w-0 text-left px-3 py-3 hover:bg-muted/50 transition-colors"
                 >
                   <p className="text-xs font-medium text-foreground line-clamp-2 leading-snug">
                     {item.title}
