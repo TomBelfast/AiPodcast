@@ -294,6 +294,7 @@ export default function SummarizePage() {
               placeholder="https://www.youtube.com/watch?v=..."
               className="border-input bg-background placeholder:text-muted-foreground flex h-10 w-full rounded-md border px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               required
+              suppressHydrationWarning
             />
             <button
               type="submit"
