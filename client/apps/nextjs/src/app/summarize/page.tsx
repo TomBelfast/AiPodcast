@@ -46,28 +46,92 @@ export default function SummarizePage() {
   const [podcast, setPodcast] = useState<PodcastState>({ status: "idle" });
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // token anulowania aktywnego pollera (zamiast setInterval — jeden, kontrolowany)
+  const pollRef = useRef<{ cancelled: boolean } | null>(null);
 
   useEffect(() => { void loadHistory(); }, []);
 
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  const cancelPoll = useCallback(() => {
+    if (pollRef.current) pollRef.current.cancelled = true;
+    pollRef.current = null;
   }, []);
 
-  const startPolling = useCallback(() => {
-    stopPolling();
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch("/api/tts-status");
-        const s = (await res.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
-        if (s.state === "idle" || s.state === "saving") return; // generatePodcast will handle final state
-        setPodcast(prev => {
-          if (prev.status !== "loading") return prev;
-          return { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs ?? [] };
-        });
-      } catch {}
-    }, 1000);
-  }, [stopPolling]);
+  type TtsStatus = {
+    state: string; message: string; elapsed_s: number | null;
+    device: string; logs: string[]; completions: number;
+  };
+  async function getStatus(): Promise<TtsStatus> {
+    return fetch("/api/tts-status", { cache: "no-store" }).then(r => r.json());
+  }
+
+  // Jednolity poller: czeka aż licznik `completions` w TTS wzrośnie (pewny
+  // sygnał ukończenia, odporny na fazę LLM i race condition), w międzyczasie
+  // pokazuje na żywo status z serwera, a po ukończeniu pobiera plik z historii.
+  async function runGeneration(opts: {
+    id?: string;
+    waitMsg: string;
+    fire: () => Promise<void>;
+  }) {
+    cancelPoll();
+    const token = { cancelled: false };
+    pollRef.current = token;
+
+    setPodcast({ status: "loading", message: opts.waitMsg, logs: [] });
+
+    // snapshot licznika PRZED uruchomieniem generowania
+    let startCompletions = 0;
+    try { startCompletions = (await getStatus()).completions ?? 0; } catch {}
+
+    try {
+      await opts.fire();
+    } catch (err) {
+      if (!token.cancelled) setPodcast({ status: "error", message: String(err) });
+      return;
+    }
+
+    const startedAt = Date.now();
+    for (let i = 0; i < 1200; i++) {            // do ~30 min @1.5s
+      if (token.cancelled) return;
+      await new Promise(r => setTimeout(r, 1500));
+      if (token.cancelled) return;
+
+      let s: TtsStatus;
+      try { s = await getStatus(); } catch { continue; }
+
+      const completed = (s.completions ?? 0) > startCompletions;
+
+      setPodcast(prev => prev.status === "loading"
+        ? {
+            status: "loading",
+            message: s.state === "idle" && !completed ? opts.waitMsg : s.message,
+            elapsed: s.elapsed_s ?? Math.round((Date.now() - startedAt) / 1000),
+            device: s.device,
+            logs: s.logs ?? [],
+          }
+        : prev);
+
+      if (!completed) continue;
+
+      // TTS skończył — poczekaj aż plik trafi do historii (zapis DB w tle)
+      for (let j = 0; j < 12; j++) {
+        if (token.cancelled) return;
+        try {
+          const hist = await fetch("/api/history", { cache: "no-store" }).then(r => r.json()) as { history: HistoryItem[] };
+          const item = opts.id ? hist.history.find(h => h.id === opts.id) : hist.history[0];
+          if (item?.podcastPath) {
+            setHistory(hist.history);
+            // ?t= wymusza świeży plik nawet przy tej samej nazwie
+            setPodcast({ status: "done", url: `${item.podcastPath}?t=${Date.now()}` });
+            return;
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 600));
+      }
+      setPodcast({ status: "error", message: "Audio gotowe, ale nie zapisano w historii" });
+      return;
+    }
+    if (!token.cancelled) setPodcast({ status: "error", message: "Przekroczono czas oczekiwania" });
+  }
 
   async function loadHistory() {
     try {
@@ -80,6 +144,7 @@ export default function SummarizePage() {
   async function handleSummarize(e: React.FormEvent) {
     e.preventDefault();
     if (!url.trim()) return;
+    cancelPoll();
     setSummary({ status: "loading" });
     setPodcast({ status: "idle" });
     try {
@@ -101,110 +166,43 @@ export default function SummarizePage() {
   }
 
   async function handleGeneratePodcast(text: string, id?: string) {
-    setPodcast({ status: "loading", message: "Startowanie generowania…", logs: [] });
-
-    // Odpala generowanie w tle na serwerze i natychmiast wraca.
-    // Nawigacja nie przerwie procesu — plik zostanie zapisany niezależnie.
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, voice, summaryId: id }),
-      });
-      if (!res.ok) {
-        const err = (await res.json()) as { error?: string };
-        setPodcast({ status: "error", message: err.error ?? "Błąd TTS" });
-        return;
-      }
-    } catch (err) {
-      setPodcast({ status: "error", message: String(err) });
-      return;
-    }
-
-    // Polluj status TTS co sekundę; gdy wróci do idle — odśwież historię
-    setPodcast({ status: "loading", message: "Generowanie audio na GPU…", logs: [] });
-    startPolling();
-
-    const pollUntilDone = async () => {
-      for (let i = 0; i < 300; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          const s = await fetch("/api/tts-status").then(r => r.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
-          setPodcast(prev => prev.status === "loading"
-            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs ?? [] }
-            : prev
-          );
-          if (s.state === "idle") {
-            stopPolling();
-            // poczekaj chwilę żeby DB zdążyła się zapisać, potem odśwież historię
-            await new Promise(r => setTimeout(r, 500));
-            const hist = await fetch("/api/history").then(r => r.json()) as { history: HistoryItem[] };
-            const item = id ? hist.history.find(h => h.id === id) : hist.history[0];
-            if (item?.podcastPath) {
-              setHistory(hist.history);
-              setPodcast({ status: "done", url: item.podcastPath });
-            } else {
-              setHistory(hist.history);
-              setPodcast({ status: "error", message: "Nie znaleziono pliku w historii" });
-            }
-            return;
-          }
-        } catch {}
-      }
-      stopPolling();
-    };
-    void pollUntilDone();
+    await runGeneration({
+      id,
+      waitMsg: "Przygotowanie syntezy mowy…",
+      fire: async () => {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voice, summaryId: id }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({})) as { error?: string };
+          throw new Error(e.error ?? "Błąd TTS");
+        }
+      },
+    });
   }
 
   async function handleGenerateDialogue(text: string, id?: string) {
-    setPodcast({ status: "loading", message: "Generowanie skryptu dialogu (LLM)…", logs: [] });
-    try {
-      const res = await fetch("/api/podcast-dialogue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ summaryText: text, summaryId: id }),
-      });
-      if (!res.ok) {
-        const e = (await res.json()) as { error?: string };
-        setPodcast({ status: "error", message: e.error ?? "Błąd" }); return;
-      }
-    } catch (err) {
-      setPodcast({ status: "error", message: String(err) }); return;
-    }
-
-    setPodcast({ status: "loading", message: "LLM pisze skrypt, TTS generuje dialog Ania + Marek…", logs: [] });
-    startPolling();
-
-    const pollUntilDone = async () => {
-      for (let i = 0; i < 600; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          const s = await fetch("/api/tts-status").then(r => r.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
-          setPodcast(prev => prev.status === "loading"
-            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs ?? [] }
-            : prev);
-          if (s.state === "idle") {
-            stopPolling();
-            await new Promise(r => setTimeout(r, 800));
-            const hist = await fetch("/api/history").then(r => r.json()) as { history: HistoryItem[] };
-            const item = id ? hist.history.find(h => h.id === id) : hist.history[0];
-            if (item?.podcastPath) {
-              setHistory(hist.history);
-              setPodcast({ status: "done", url: item.podcastPath });
-            } else {
-              setHistory(hist.history);
-              setPodcast({ status: "error", message: "Plik nie pojawił się w historii" });
-            }
-            return;
-          }
-        } catch {}
-      }
-      stopPolling();
-    };
-    void pollUntilDone();
+    await runGeneration({
+      id,
+      waitMsg: "LLM pisze skrypt dialogu (Ania + Marek)…",
+      fire: async () => {
+        const res = await fetch("/api/podcast-dialogue", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ summaryText: text, summaryId: id }),
+        });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({})) as { error?: string };
+          throw new Error(e.error ?? "Błąd");
+        }
+      },
+    });
   }
 
   function loadFromHistory(item: HistoryItem) {
+    cancelPoll();
     setUrl(item.youtubeUrl);
     setSummaryStyle((item.summaryStyle as StyleId) ?? "encyclopedic");
     setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl, summaryStyle: item.summaryStyle });

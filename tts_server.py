@@ -43,7 +43,10 @@ except Exception as _e:
 
 # ── State ──────────────────────────────────────────────────────────────────────
 _state_lock = threading.Lock()
-_status = {"state": "idle", "message": "Ready", "device": "unknown", "started_at": None}
+# completions: monotoniczny licznik ukończonych syntez — pewny sygnał "skończone"
+# dla klienta, odporny na race condition (klient czeka aż licznik wzrośnie).
+_status = {"state": "idle", "message": "Ready", "device": "unknown",
+           "started_at": None, "completions": 0}
 _log_lines: collections.deque = collections.deque(maxlen=50)
 
 def _set_status(state: str, message: str):
@@ -56,6 +59,10 @@ def _set_status(state: str, message: str):
             _status["started_at"] = None
     _log_lines.append(f"[{time.strftime('%H:%M:%S')}] {message}")
     log.info(message)
+
+def _mark_completed():
+    with _state_lock:
+        _status["completions"] += 1
 
 # ── TTS instance ───────────────────────────────────────────────────────────────
 _tts_lock = threading.Lock()
@@ -144,6 +151,7 @@ def _do_synthesize_dialogue(segments: list, voices: dict, model: str = "superton
     _set_status("saving", "Sklejanie i zapis WAV…")
     result = _array_to_wav(combined, tts.sample_rate)
     _set_status("idle", f"Podcast gotowy — {len(combined)/tts.sample_rate:.1f}s, {len(result)//1024} KB")
+    _mark_completed()
     return result
 
 def _do_synthesize(text: str, voice: str, model: str, lang: str = "na") -> bytes:
@@ -169,6 +177,7 @@ def _do_synthesize(text: str, voice: str, model: str, lang: str = "na") -> bytes
 
     dur = float(duration[0]) if hasattr(duration, '__len__') else float(duration)
     _set_status("idle", f"Gotowe — {dur:.1f}s audio, {len(data)//1024} KB")
+    _mark_completed()
     return data
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
@@ -260,7 +269,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not found"})
 
 
+class ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True  # pozwala na restart bez czekania na TIME_WAIT
+
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", TTS_PORT), Handler)
+    server = ReusableHTTPServer(("0.0.0.0", TTS_PORT), Handler)
     log.info(f"TTS server on :{TTS_PORT}")
     server.serve_forever()
