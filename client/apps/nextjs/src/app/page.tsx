@@ -1,6 +1,2 @@
-import { redirect } from "next/navigation";
-
-// Root → aplikacja (podsumowania). Stary landing marketingowy jest w historii gita.
-export default function RootPage() {
-  redirect("/summarize");
-}
+// Root serwuje bezpośrednio aplikację (podsumowania) — bez landingu, bez redirectu.
+export { default } from "./summarize/page";
