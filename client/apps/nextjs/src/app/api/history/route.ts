@@ -12,6 +12,7 @@ export async function GET() {
         title: summary.title,
         summaryText: summary.summaryText,
         podcastPath: summary.podcastPath,
+        summaryStyle: summary.summaryStyle,
         createdAt: summary.createdAt,
       })
       .from(summary)

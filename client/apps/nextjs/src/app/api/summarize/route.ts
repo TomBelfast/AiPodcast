@@ -43,7 +43,39 @@ async function fetchTranscript(videoUrl: string): Promise<{ text: string; title:
   return { text, title };
 }
 
-async function callLLM(transcript: string): Promise<string> {
+const ENGLISH_RULE = `Nazwy własne, marki, technologie i terminy techniczne ZAWSZE zostawiasz w oryginalnej angielskiej formie. Nigdy ich nie tłumaczysz ani nie przekształcasz fonetycznie.`;
+
+function buildPrompt(style: string, transcript: string): { system: string; user: string } {
+  switch (style) {
+    case "short":
+      return {
+        system: `Piszesz ultraskondensowane podsumowania po polsku. Maksymalnie 5 zdań. Zero lania wody. ${ENGLISH_RULE}`,
+        user: `Napisz podsumowanie w MAKSYMALNIE 5 zdaniach. Tylko najważniejsze fakty i wnioski. Żadnych wstępów ani ozdobników.\n\nTRANSKRYPT:\n${transcript}`,
+      };
+    case "simple":
+      return {
+        system: `Tłumaczysz skomplikowane tematy prostym językiem — jak dla 12-latka, który nigdy nie słyszał o tej dziedzinie. Używasz analogii z codziennego życia, unikasz żargonu. ${ENGLISH_RULE}`,
+        user: `Napisz podsumowanie prostym, przystępnym językiem. Każde pojęcie techniczne wyjaśnij jednym prostym zdaniem lub analogią. Pisz tak, żeby zrozumiała osoba bez żadnego technicznego przygotowania.\n\nTRANSKRYPT:\n${transcript}`,
+      };
+    case "tv":
+      return {
+        system: `Jesteś prezenterem wiadomości TVN24. Piszesz zwięźle, neutralnie i rzeczowo. Używasz stylu dziennikarskiego: "Eksperci wskazują…", "Jak podaje…", "Z informacji wynika…". Żadnych opinii, tylko fakty. ${ENGLISH_RULE}`,
+        user: `Napisz materiał na wiadomości telewizyjne — 2-3 zwięzłe akapity. Zacznij od najmocniejszego faktu. Styl: neutralny, dziennikarski, bez emocji. Zakończ zdaniem podsumowującym znaczenie tematu.\n\nTRANSKRYPT:\n${transcript}`,
+      };
+    case "podcast":
+      return {
+        system: `Prowadzisz podcast w stylu Joe Rogana. Mówisz luźno, z autentycznym entuzjazmem, wtrącasz komentarze typu "kurde, to jest niesamowite", "pomyślcie o tym", "serio, to mnie wciągnęło". Dygresje mile widziane. Piszesz jak mówisz — naturalnie, bez formalności. ${ENGLISH_RULE}`,
+        user: `Napisz skrypt odcinka podcastu w stylu Joe Rogana. Luźna, wciągająca narracja — jakbyś opowiadał to znajomym przy kawie. Pokaż swój entuzjazm, zadawaj retoryczne pytania, komentuj co cię zaskakuje. Bez formalizmu.\n\nTRANSKRYPT:\n${transcript}`,
+      };
+    default: // encyclopedic
+      return {
+        system: `Jesteś redaktorem encyklopedycznym piszącym po polsku w stylu Wikipedii. Piszesz jasno, zwięźle i neutralnie. Piszesz pełnymi zdaniami, bez list — styl narracyjny nadający się do czytania na głos. Unikasz żargonu — przy pojęciu technicznym dodajesz krótkie wyjaśnienie. ${ENGLISH_RULE}`,
+        user: `Napisz szczegółowe podsumowanie w stylu artykułu encyklopedycznego. Zacznij od jednego zdania o czym jest materiał. Omów zagadnienia w logicznej kolejności — każde w osobnym akapicie. Zakończ wnioskami.\n\nTRANSKRYPT:\n${transcript}`,
+      };
+  }
+}
+
+async function callLLM(transcript: string, style: string): Promise<string> {
   const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
   const apiKey = cfg("LLM_API_KEY");
   const model  = cfg("LLM_MODEL", "gemini-2.5-flash");
@@ -51,6 +83,8 @@ async function callLLM(transcript: string): Promise<string> {
   if (!cfg("LLM_API_URL") || !apiKey) {
     throw new Error("LLM_API_URL i LLM_API_KEY muszą być skonfigurowane w .env");
   }
+
+  const { system, user } = buildPrompt(style, transcript);
 
   const res = await fetch(apiUrl, {
     method: "POST",
@@ -61,31 +95,11 @@ async function callLLM(transcript: string): Promise<string> {
     body: JSON.stringify({
       model,
       messages: [
-        {
-          role: "system",
-          content: `Jesteś redaktorem encyklopedycznym piszącym po polsku w stylu Wikipedii. Twoje zasady:
-1. Piszesz jasno, zwięźle i neutralnie — tak aby osoba bez wiedzy technicznej rozumiała każde zdanie.
-2. Nazwy własne, marki, technologie i terminy techniczne ZAWSZE zostawiasz w oryginalnej angielskiej formie (np. "Proxmox", "load balancing", "GPU", "Docker", "API"). Nigdy ich nie tłumaczysz ani nie przekształcasz fonetycznie.
-3. Piszesz pełnymi zdaniami, bez list i punktorów — styl narracyjny nadający się do czytania na głos.
-4. Unikasz żargonu — gdy musisz użyć pojęcia technicznego, w nawiasie dodajesz krótkie wyjaśnienie po polsku.`,
-        },
-        {
-          role: "user",
-          content: `Napisz szczegółowe podsumowanie poniższego transkryptu w języku polskim, w stylu artykułu encyklopedycznego.
-
-Struktura:
-- Zacznij od jednego zdania wyjaśniającego o czym jest materiał i dlaczego jest istotny.
-- Następnie omów kolejne zagadnienia w logicznej kolejności — każde w osobnym akapicie.
-- Zakończ wnioskami lub praktycznym znaczeniem omawianych treści.
-
-Pamiętaj: nazwy angielskie (produkty, technologie, firmy, funkcje) zostaw dokładnie tak jak są w transkrypcie — nie tłumacz ich na polski.
-
-TRANSKRYPT:
-${transcript}`,
-        },
+        { role: "system", content: system },
+        { role: "user",   content: user },
       ],
-      temperature: 0.4,
-      max_tokens: 2048,
+      temperature: style === "podcast" ? 0.8 : style === "short" ? 0.2 : 0.4,
+      max_tokens: style === "short" ? 512 : 2048,
     }),
   });
 
@@ -101,10 +115,11 @@ ${transcript}`,
 }
 
 export async function POST(req: Request) {
-  let videoUrl: string;
+  let videoUrl: string, summaryStyle: string;
   try {
-    const body = (await req.json()) as { url?: string };
+    const body = (await req.json()) as { url?: string; summaryStyle?: string };
     videoUrl = (body.url ?? "").trim();
+    summaryStyle = (body.summaryStyle ?? "encyclopedic").trim();
     if (!videoUrl) throw new Error("brak url");
   } catch {
     return NextResponse.json({ error: "Podaj URL do YouTube" }, { status: 400 });
@@ -116,7 +131,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Nie można pobrać transkryptu z tego wideo" }, { status: 422 });
     }
 
-    const summaryText = await callLLM(transcript);
+    const summaryText = await callLLM(transcript, summaryStyle);
     if (!summaryText) {
       return NextResponse.json({ error: "LLM nie zwróciło treści" }, { status: 502 });
     }
@@ -126,9 +141,10 @@ export async function POST(req: Request) {
       title,
       transcript,
       summaryText,
+      summaryStyle,
     }).returning({ id: summary.id });
 
-    return NextResponse.json({ summary: summaryText, id: saved?.id, title, youtubeUrl: videoUrl });
+    return NextResponse.json({ summary: summaryText, id: saved?.id, title, youtubeUrl: videoUrl, summaryStyle });
   } catch (err) {
     console.error("[summarize]", err);
     const msg = err instanceof Error ? err.message : String(err);

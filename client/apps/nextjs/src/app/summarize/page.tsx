@@ -2,10 +2,24 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 
+const STYLES = [
+  { id: "encyclopedic", label: "📖 Wikipedia",       desc: "Encyklopedyczny, szczegółowy" },
+  { id: "short",        label: "⚡ Bardzo krótkie",  desc: "Maks 5 zdań, tylko esencja" },
+  { id: "simple",       label: "👶 Dla laika",        desc: "Bez żargonu, z analogiami" },
+  { id: "tv",           label: "📺 Wiadomości TV",   desc: "Dziennikarski, neutralny" },
+  { id: "podcast",      label: "🎙 Podcast (Rogan)", desc: "Luźny, entuzjastyczny" },
+] as const;
+
+type StyleId = typeof STYLES[number]["id"];
+
+function styleLabel(id: string) {
+  return STYLES.find(s => s.id === id)?.label ?? id;
+}
+
 type SummaryState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "done"; text: string; id?: string; title?: string; youtubeUrl?: string }
+  | { status: "done"; text: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string }
   | { status: "error"; message: string };
 
 type PodcastState =
@@ -20,12 +34,14 @@ interface HistoryItem {
   title: string;
   summaryText: string;
   podcastPath: string | null;
+  summaryStyle: string;
   createdAt: string;
 }
 
 export default function SummarizePage() {
   const [url, setUrl] = useState("");
   const [voice, setVoice] = useState("F1");
+  const [summaryStyle, setSummaryStyle] = useState<StyleId>("encyclopedic");
   const [summary, setSummary] = useState<SummaryState>({ status: "idle" });
   const [podcast, setPodcast] = useState<PodcastState>({ status: "idle" });
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -70,13 +86,13 @@ export default function SummarizePage() {
       const res = await fetch("/api/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: url.trim(), summaryStyle }),
       });
       const data = (await res.json()) as { summary?: string; id?: string; title?: string; youtubeUrl?: string; error?: string };
       if (!res.ok || data.error) {
         setSummary({ status: "error", message: data.error ?? "Nieznany błąd" });
       } else {
-        setSummary({ status: "done", text: data.summary ?? "", id: data.id, title: data.title, youtubeUrl: data.youtubeUrl });
+        setSummary({ status: "done", text: data.summary ?? "", id: data.id, title: data.title, youtubeUrl: data.youtubeUrl, summaryStyle: data.summaryStyle });
         void loadHistory();
       }
     } catch (err) {
@@ -142,7 +158,8 @@ export default function SummarizePage() {
 
   function loadFromHistory(item: HistoryItem) {
     setUrl(item.youtubeUrl);
-    setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl });
+    setSummaryStyle((item.summaryStyle as StyleId) ?? "encyclopedic");
+    setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl, summaryStyle: item.summaryStyle });
     if (item.podcastPath) {
       setPodcast({ status: "done", url: item.podcastPath });
     } else {
@@ -179,9 +196,10 @@ export default function SummarizePage() {
                   <p className="text-xs font-medium text-foreground line-clamp-2 leading-snug">
                     {item.title}
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {formatDate(item.createdAt)}
-                    {item.podcastPath && <span className="ml-2">🎙</span>}
+                  <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
+                    <span>{formatDate(item.createdAt)}</span>
+                    <span>{styleLabel(item.summaryStyle)}</span>
+                    {item.podcastPath && <span>🎙</span>}
                   </p>
                 </button>
               </li>
@@ -198,6 +216,25 @@ export default function SummarizePage() {
             <p className="text-muted-foreground mt-1 text-sm">
               Wklej link do YouTube, wygeneruj podsumowanie i podcast.
             </p>
+          </div>
+
+          {/* Styl podsumowania */}
+          <div className="flex flex-wrap gap-2">
+            {STYLES.map(s => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => setSummaryStyle(s.id)}
+                title={s.desc}
+                className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
+                  summaryStyle === s.id
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "bg-background border-input hover:bg-muted"
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
           </div>
 
           {/* URL input */}
