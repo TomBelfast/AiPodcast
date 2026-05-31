@@ -51,6 +51,40 @@ export default function SummarizePage() {
   // token anulowania aktywnego pollera (zamiast setInterval — jeden, kontrolowany)
   const pollRef = useRef<{ cancelled: boolean } | null>(null);
 
+  // edytor promptów
+  const [promptEditor, setPromptEditor] = useState<{
+    style: StyleId; system: string; user: string; isCustom: boolean; saving: boolean;
+  } | null>(null);
+
+  async function openPromptEditor(style: StyleId) {
+    try {
+      const { prompts } = await fetch("/api/prompts").then(r => r.json()) as {
+        prompts: Record<string, { system: string; user: string; isCustom: boolean }>;
+      };
+      const p = prompts[style];
+      setPromptEditor({ style, system: p?.system ?? "", user: p?.user ?? "", isCustom: p?.isCustom ?? false, saving: false });
+    } catch {
+      setPromptEditor({ style, system: "", user: "", isCustom: false, saving: false });
+    }
+  }
+
+  async function savePrompt(reset = false) {
+    if (!promptEditor) return;
+    setPromptEditor({ ...promptEditor, saving: true });
+    try {
+      await fetch("/api/prompts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reset
+          ? { style: promptEditor.style, reset: true }
+          : { style: promptEditor.style, system: promptEditor.system, user: promptEditor.user }),
+      });
+      setPromptEditor(null);
+    } catch {
+      setPromptEditor({ ...promptEditor, saving: false });
+    }
+  }
+
   useEffect(() => { void loadHistory(); }, []);
 
   const cancelPoll = useCallback(() => {
@@ -286,19 +320,33 @@ export default function SummarizePage() {
           {/* Styl podsumowania */}
           <div className="flex flex-wrap gap-2">
             {STYLES.map(s => (
-              <button
+              <div
                 key={s.id}
-                type="button"
-                onClick={() => setSummaryStyle(s.id)}
                 title={s.desc}
-                className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
+                className={`group inline-flex items-center rounded-full border text-sm font-medium transition-colors ${
                   summaryStyle === s.id
                     ? "bg-primary text-primary-foreground border-primary"
                     : "bg-background border-input hover:bg-muted"
                 }`}
               >
-                {s.label}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setSummaryStyle(s.id)}
+                  className="pl-3 pr-2 py-1.5"
+                >
+                  {s.label}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openPromptEditor(s.id)}
+                  title="Edytuj prompt tego stylu"
+                  className={`pr-2.5 pl-1 py-1.5 opacity-60 hover:opacity-100 ${
+                    summaryStyle === s.id ? "" : "text-muted-foreground"
+                  }`}
+                >
+                  ⚙️
+                </button>
+              </div>
             ))}
           </div>
 
@@ -461,6 +509,80 @@ export default function SummarizePage() {
           )}
         </div>
       </main>
+
+      {/* Modal edycji promptu */}
+      {promptEditor && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => !promptEditor.saving && setPromptEditor(null)}
+        >
+          <div
+            className="bg-background rounded-lg border shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">
+                Edytuj prompt — {styleLabel(promptEditor.style)}
+                {promptEditor.isCustom && (
+                  <span className="ml-2 text-xs text-amber-500">● zmodyfikowany</span>
+                )}
+              </h3>
+              <button onClick={() => setPromptEditor(null)} className="text-muted-foreground hover:text-foreground">✕</button>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-1 block">System prompt (rola / styl)</label>
+              <textarea
+                value={promptEditor.system}
+                onChange={(e) => setPromptEditor({ ...promptEditor, system: e.target.value })}
+                rows={5}
+                className="border-input bg-background w-full rounded-md border px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </div>
+
+            <div>
+              <label className="text-sm font-medium mb-1 block">
+                User prompt (instrukcja) — użyj <code className="bg-muted px-1 rounded">{"{transcript}"}</code> jako miejsce na transkrypt
+              </label>
+              <textarea
+                value={promptEditor.user}
+                onChange={(e) => setPromptEditor({ ...promptEditor, user: e.target.value })}
+                rows={7}
+                className="border-input bg-background w-full rounded-md border px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Jeśli pominiesz {"{transcript}"}, transkrypt zostanie dopisany automatycznie na końcu.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <button
+                onClick={() => savePrompt(true)}
+                disabled={promptEditor.saving}
+                className="text-sm text-muted-foreground hover:text-destructive underline underline-offset-2 disabled:opacity-50"
+              >
+                Przywróć domyślny
+              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPromptEditor(null)}
+                  disabled={promptEditor.saving}
+                  className="inline-flex h-10 items-center rounded-md border px-4 text-sm font-medium hover:bg-muted disabled:opacity-50"
+                >
+                  Anuluj
+                </button>
+                <button
+                  onClick={() => savePrompt(false)}
+                  disabled={promptEditor.saving}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 text-sm font-medium disabled:opacity-50"
+                >
+                  {promptEditor.saving ? "Zapisuję…" : "💾 Zapisz"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
