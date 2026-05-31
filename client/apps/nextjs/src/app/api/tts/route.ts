@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
+import { phoneticizeForTTS } from "../_lib/llm";
 
 function getTtsUrl(): string {
   if (process.env.TTS_SERVER_URL) return process.env.TTS_SERVER_URL;
@@ -27,10 +28,13 @@ function ensurePodcastsDir() {
 // Zapis pliku i aktualizacja bazy następuje po zakończeniu generowania.
 async function generateInBackground(text: string, voice: string, summaryId: string | undefined) {
   try {
+    // fonetyzacja angielskich terminów dla poprawnej wymowy w TTS
+    const spoken = await phoneticizeForTTS(text);
+
     const res = await fetch(`${getTtsUrl()}/synthesize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice, lang: "na" }),
+      body: JSON.stringify({ text: spoken, voice, lang: "na" }),
       // brak signal — generowanie nie zostanie przerwane nawet jeśli
       // klient rozłączy się lub zmieni stronę
     });

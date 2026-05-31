@@ -4,21 +4,8 @@ import { NextResponse } from "next/server";
 import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
+import { cfg, readEnv, PHONETIC_RULE } from "../_lib/llm";
 
-function readEnv(): Record<string, string> {
-  try {
-    const p = path.resolve(process.cwd(), "../../.env");
-    const out: Record<string, string> = {};
-    for (const line of fs.readFileSync(p, "utf8").split("\n")) {
-      const m = line.match(/^([A-Z_]+)=['"]?(.+?)['"]?\s*$/);
-      if (m) out[m[1]!] = m[2]!;
-    }
-    return out;
-  } catch { return {}; }
-}
-function cfg(key: string, fallback = "") {
-  return process.env[key] || readEnv()[key] || fallback;
-}
 function getTtsUrl() {
   return process.env.TTS_SERVER_URL || readEnv().TTS_SERVER_URL || "http://localhost:8765";
 }
@@ -28,11 +15,12 @@ const DIALOGUE_SYSTEM = `Jesteś scenarzystą podcastów. Tworzysz naturalne, wc
 - Marek: analityczny, zadaje pytania wyjaśniające, robi odniesienia do popkultury, czasem kończy zdania Ani
 
 Zasady:
-1. Nazwy angielskie (technologie, marki, produkty) ZAWSZE zostają w oryginalnej formie
-2. Dialogi mają brzmieć naturalnie — używaj "no właśnie", "wiesz co", "dokładnie", "serio?", "kurde"
-3. Format WYŁĄCZNIE: "Ania: tekst" lub "Marek: tekst" — każda kwestia w nowej linii
-4. Minimum 8, maksimum 20 wymian
-5. Zacznij od Ani witającej słuchaczy i zapowiadającej temat`;
+1. Dialogi mają brzmieć naturalnie — używaj "no właśnie", "wiesz co", "dokładnie", "serio?", "kurde"
+2. Format WYŁĄCZNIE: "Ania: tekst" lub "Marek: tekst" — każda kwestia w nowej linii
+3. Minimum 8, maksimum 20 wymian
+4. Zacznij od Ani witającej słuchaczy i zapowiadającej temat
+
+${PHONETIC_RULE}`;
 
 const DIALOGUE_USER = (summaryText: string) => `Na podstawie poniższego podsumowania utwórz skrypt podcastu jako dialog Ani i Marka.
 Zachowaj wszystkie ważne informacje z podsumowania — zamień je w naturalną rozmowę.
