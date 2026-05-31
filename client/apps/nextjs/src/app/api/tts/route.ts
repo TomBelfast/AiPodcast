@@ -5,6 +5,7 @@ import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
 import { phoneticizeForTTS } from "../_lib/llm";
+import { readSettings } from "../_lib/settings";
 
 function getTtsUrl(): string {
   if (process.env.TTS_SERVER_URL) return process.env.TTS_SERVER_URL;
@@ -26,15 +27,19 @@ function ensurePodcastsDir() {
 
 // Generuje audio w tle — niezależnie od połączenia z przeglądarką.
 // Zapis pliku i aktualizacja bazy następuje po zakończeniu generowania.
-async function generateInBackground(text: string, voice: string, summaryId: string | undefined) {
+async function generateInBackground(text: string, gender: "female" | "male", summaryId: string | undefined) {
   try {
     // fonetyzacja angielskich terminów dla poprawnej wymowy w TTS
     const spoken = await phoneticizeForTTS(text);
 
+    // preset głosu wg płci z zapisanych ustawień (głos + tempo + jakość)
+    const s = readSettings();
+    const preset = gender === "male" ? s.male : s.female;
+
     const res = await fetch(`${getTtsUrl()}/synthesize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: spoken, voice, lang: "na" }),
+      body: JSON.stringify({ text: spoken, voice: preset.voice, speed: preset.speed, steps: preset.steps, lang: "na" }),
       // brak signal — generowanie nie zostanie przerwane nawet jeśli
       // klient rozłączy się lub zmieni stronę
     });
@@ -62,11 +67,11 @@ async function generateInBackground(text: string, voice: string, summaryId: stri
 }
 
 export async function POST(req: Request) {
-  let text: string, voice: string, summaryId: string | undefined;
+  let text: string, gender: "female" | "male", summaryId: string | undefined;
   try {
-    const body = (await req.json()) as { text?: string; voice?: string; summaryId?: string };
+    const body = (await req.json()) as { text?: string; gender?: string; summaryId?: string };
     text = (body.text ?? "").trim();
-    voice = body.voice ?? "F1";
+    gender = body.gender === "male" ? "male" : "female";
     summaryId = body.summaryId;
     if (!text) throw new Error("brak tekstu");
   } catch {
@@ -74,7 +79,7 @@ export async function POST(req: Request) {
   }
 
   // Odpal w tle i natychmiast odpowiedz — nawigacja nie przerwie generowania
-  void generateInBackground(text, voice, summaryId);
+  void generateInBackground(text, gender, summaryId);
 
   return NextResponse.json({ status: "generating" });
 }

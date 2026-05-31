@@ -5,6 +5,7 @@ import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
 import { cfg, readEnv, PHONETIC_RULE } from "../_lib/llm";
+import { readSettings } from "../_lib/settings";
 
 function getTtsUrl() {
   return process.env.TTS_SERVER_URL || readEnv().TTS_SERVER_URL || "http://localhost:8765";
@@ -73,12 +74,15 @@ async function generateDialogueScript(summaryText: string): Promise<Segment[]> {
 const PODCASTS_DIR = "/app/podcasts";
 
 async function generateDialogueAudio(segments: Segment[]): Promise<Buffer> {
+  const s = readSettings();
   const res = await fetch(`${getTtsUrl()}/podcast`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       segments,
-      voices: { ania: "F1", marek: "M1" },
+      // Ania = preset kobiecy, Marek = preset męski (każdy z własnym tempem/jakością)
+      voices: { ania: s.female, marek: s.male },
+      silence: s.pause,
     }),
   });
   if (!res.ok) {

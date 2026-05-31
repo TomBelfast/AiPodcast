@@ -124,15 +124,27 @@ def _array_to_wav(arr, sample_rate: int) -> bytes:
         wf.writeframes(pcm.tobytes())
     return buf.getvalue()
 
+def _resolve_voice_cfg(value, fallback_voice: str, steps: int, speed: float) -> dict:
+    """Wartość w `voices` może być stringiem ('F1') lub dict {voice,speed,steps}."""
+    if isinstance(value, dict):
+        return {
+            "voice": value.get("voice") or fallback_voice,
+            "steps": int(value.get("steps") or steps),
+            "speed": float(value.get("speed") or speed),
+        }
+    return {"voice": value or fallback_voice, "steps": steps, "speed": speed}
+
 def _do_synthesize_dialogue(segments: list, voices: dict, model: str = "supertonic-3",
-                            steps: int = QUALITY_STEPS, speed: float = 1.05) -> bytes:
+                            steps: int = QUALITY_STEPS, speed: float = 1.05,
+                            silence_s: float = 0.4) -> bytes:
     """
     Generuje audio dla listy {speaker, text}, skleja w jeden WAV.
-    voices: {"ania": "F1", "marek": "M1"}
+    voices: {"ania": "F1", ...} LUB {"ania": {voice,speed,steps}, ...}
+    silence_s: pauza między kwestiami (sek.)
     """
     import numpy as np
     tts = get_tts(model)
-    silence_samples = int(tts.sample_rate * 0.4)  # 400ms ciszy między kwestiami
+    silence_samples = int(tts.sample_rate * max(0.0, silence_s))
     silence = np.zeros(silence_samples, dtype=np.float32)
 
     arrays = []
@@ -142,14 +154,16 @@ def _do_synthesize_dialogue(segments: list, voices: dict, model: str = "superton
         text = (seg.get("text") or "").strip()
         if not text:
             continue
-        voice_name = voices.get(speaker) or DEFAULT_HOST_VOICES.get(speaker, "F1")
-        _set_status("generating", f"Segment {i+1}/{total} — {speaker} ({voice_name}): {text[:50]}…")
-        voice_style = tts.get_voice_style(voice_name=voice_name)
-        wav, _ = tts.synthesize(text=text, voice_style=voice_style, lang="na", total_steps=steps, speed=speed)
+        cfg = _resolve_voice_cfg(voices.get(speaker), DEFAULT_HOST_VOICES.get(speaker, "F1"), steps, speed)
+        _set_status("generating", f"Segment {i+1}/{total} — {speaker} ({cfg['voice']}, {cfg['steps']} kr., {cfg['speed']}x): {text[:40]}…")
+        voice_style = tts.get_voice_style(voice_name=cfg["voice"])
+        wav, _ = tts.synthesize(text=text, voice_style=voice_style, lang="na",
+                                total_steps=cfg["steps"], speed=cfg["speed"])
         # wav shape: (1, samples) — flatten to 1D
         arr = wav[0] if hasattr(wav, '__len__') and len(wav.shape) > 1 else wav
         arrays.append(arr.astype(np.float32))
-        arrays.append(silence)
+        if silence_samples > 0:
+            arrays.append(silence)
 
     if not arrays:
         raise ValueError("Brak segmentów do syntezy")
@@ -268,10 +282,11 @@ class Handler(BaseHTTPRequestHandler):
             model    = body.get("model", "supertonic-3")
             steps    = int(body.get("steps") or QUALITY_STEPS)
             speed    = float(body.get("speed") or 1.05)
+            silence  = float(body.get("silence") if body.get("silence") is not None else 0.4)
             if not segments:
                 self.send_json(400, {"error": "segments is required"}); return
             try:
-                self._send_audio(_do_synthesize_dialogue(segments, voices, model, steps, speed))
+                self._send_audio(_do_synthesize_dialogue(segments, voices, model, steps, speed, silence))
             except Exception as e:
                 log.exception("podcast failed")
                 _set_status("idle", f"Błąd: {e}")

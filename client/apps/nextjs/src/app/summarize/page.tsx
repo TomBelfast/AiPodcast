@@ -42,7 +42,7 @@ interface HistoryItem {
 
 export default function SummarizePage() {
   const [url, setUrl] = useState("");
-  const [voice, setVoice] = useState("F1");
+  const [monologGender, setMonologGender] = useState<"female" | "male">("female");
   const [summaryStyle, setSummaryStyle] = useState<StyleId>("encyclopedic");
   const [summary, setSummary] = useState<SummaryState>({ status: "idle" });
   const [podcast, setPodcast] = useState<PodcastState>({ status: "idle" });
@@ -175,7 +175,7 @@ export default function SummarizePage() {
         const res = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, voice, summaryId: id }),
+          body: JSON.stringify({ text, gender: monologGender, summaryId: id }),
         });
         if (!res.ok) {
           const e = await res.json().catch(() => ({})) as { error?: string };
@@ -380,19 +380,25 @@ export default function SummarizePage() {
               <div className="bg-card rounded-lg border p-5">
                 <p className="text-lg font-semibold mb-1">🔊 Podcast</p>
                 <p className="text-xs text-muted-foreground mb-3">
-                  Zamień powyższe podsumowanie na mowę. Wybierz wariant — gotowe audio pojawi się poniżej i w historii (🎙).
+                  Zamień powyższe podsumowanie na mowę. Głosy i parametry ustawisz w{" "}
+                  <Link href="/playground" className="text-primary underline underline-offset-2">Playground</Link>.
+                  Gotowe audio pojawi się poniżej i w historii (🎙).
                 </p>
                 <div className="flex items-center gap-3 flex-wrap">
-                  <select
-                    value={voice}
-                    onChange={(e) => setVoice(e.target.value)}
-                    className="border-input bg-background h-10 rounded-md border px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <option value="M1">Głos M1 (mężczyzna)</option>
-                    <option value="M2">Głos M2 (mężczyzna)</option>
-                    <option value="F1">Głos F1 (kobieta)</option>
-                    <option value="F2">Głos F2 (kobieta)</option>
-                  </select>
+                  <div className="inline-flex rounded-md border overflow-hidden">
+                    <button
+                      onClick={() => setMonologGender("female")}
+                      className={`px-3 h-10 text-sm font-medium transition-colors ${monologGender === "female" ? "bg-primary text-primary-foreground" : "bg-background hover:bg-muted"}`}
+                    >
+                      👩 Kobiecy
+                    </button>
+                    <button
+                      onClick={() => setMonologGender("male")}
+                      className={`px-3 h-10 text-sm font-medium transition-colors border-l ${monologGender === "male" ? "bg-primary text-primary-foreground" : "bg-background hover:bg-muted"}`}
+                    >
+                      👨 Męski
+                    </button>
+                  </div>
 
                   <button
                     onClick={() => handleGeneratePodcast(activeSummary.text, activeSummary.id)}

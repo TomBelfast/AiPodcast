@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
 const VOICES = [
@@ -32,6 +32,50 @@ export default function PlaygroundPage() {
   const [steps, setSteps] = useState(32);
   const [gen, setGen] = useState<GenState>({ status: "idle" });
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // zapisane presety + pauza
+  const [saved, setSaved] = useState<{
+    female: { voice: string; speed: number; steps: number };
+    male: { voice: string; speed: number; steps: number };
+    pause: number;
+  } | null>(null);
+  const [savedMsg, setSavedMsg] = useState("");
+
+  useEffect(() => { void loadSettings(); }, []);
+
+  async function loadSettings() {
+    try {
+      const s = await fetch("/api/tts-settings").then(r => r.json());
+      setSaved(s);
+    } catch {}
+  }
+
+  async function savePreset(gender: "female" | "male") {
+    const body = { [gender]: { voice, speed, steps } };
+    try {
+      const s = await fetch("/api/tts-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(r => r.json());
+      setSaved(s);
+      setSavedMsg(`Zapisano jako głos ${gender === "female" ? "kobiecy" : "męski"}: ${voice} · ${speed.toFixed(2)}× · ${steps} kroków`);
+      setTimeout(() => setSavedMsg(""), 4000);
+    } catch {
+      setSavedMsg("Błąd zapisu");
+    }
+  }
+
+  async function savePause(pause: number) {
+    try {
+      const s = await fetch("/api/tts-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pause }),
+      }).then(r => r.json());
+      setSaved(s);
+    } catch {}
+  }
 
   async function play() {
     if (!text.trim()) return;
@@ -138,14 +182,35 @@ export default function PlaygroundPage() {
           </div>
         </div>
 
-        {/* Akcja */}
-        <button
-          onClick={play}
-          disabled={gen.status === "loading"}
-          className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-11 items-center rounded-md px-6 text-sm font-semibold transition-colors disabled:opacity-50"
-        >
-          {gen.status === "loading" ? "⏳ Generuję…" : "▶ Odtwórz"}
-        </button>
+        {/* Akcje */}
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={play}
+            disabled={gen.status === "loading"}
+            className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-11 items-center rounded-md px-6 text-sm font-semibold transition-colors disabled:opacity-50"
+          >
+            {gen.status === "loading" ? "⏳ Generuję…" : "▶ Odtwórz"}
+          </button>
+          <span className="text-muted-foreground text-sm">Zapisz obecne ustawienia jako:</span>
+          <button
+            onClick={() => savePreset("female")}
+            className="inline-flex h-11 items-center rounded-md border px-4 text-sm font-medium hover:bg-muted transition-colors"
+          >
+            💾 👩 Głos kobiecy
+          </button>
+          <button
+            onClick={() => savePreset("male")}
+            className="inline-flex h-11 items-center rounded-md border px-4 text-sm font-medium hover:bg-muted transition-colors"
+          >
+            💾 👨 Głos męski
+          </button>
+        </div>
+
+        {savedMsg && (
+          <div className="rounded-md border border-green-500/40 bg-green-500/10 p-3 text-sm text-green-600 dark:text-green-400">
+            ✓ {savedMsg}
+          </div>
+        )}
 
         {gen.status === "error" && (
           <div className="rounded-md border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
@@ -159,6 +224,44 @@ export default function PlaygroundPage() {
               {voice} · {speed.toFixed(2)}× · {steps} kroków · wygenerowano w {gen.ms} ms
             </p>
             <audio ref={audioRef} controls src={gen.url} className="w-full" />
+          </div>
+        )}
+
+        {/* Zapisane ustawienia (używane przy generowaniu podcastu) */}
+        {saved && (
+          <div className="bg-card rounded-lg border p-4 space-y-3 mt-2">
+            <p className="text-sm font-semibold">⚙️ Zapisane ustawienia podcastu</p>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-md border p-3">
+                <p className="font-medium">👩 Głos kobiecy <span className="text-xs text-muted-foreground">(Ania / monolog kobiecy)</span></p>
+                <p className="text-muted-foreground text-xs mt-1">
+                  {saved.female.voice} · {saved.female.speed.toFixed(2)}× · {saved.female.steps} kroków
+                </p>
+              </div>
+              <div className="rounded-md border p-3">
+                <p className="font-medium">👨 Głos męski <span className="text-xs text-muted-foreground">(Marek / monolog męski)</span></p>
+                <p className="text-muted-foreground text-xs mt-1">
+                  {saved.male.voice} · {saved.male.speed.toFixed(2)}× · {saved.male.steps} kroków
+                </p>
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium flex justify-between">
+                <span>⏸ Pauza między kwestiami w dialogu</span>
+                <span className="text-muted-foreground tabular-nums">{saved.pause.toFixed(1)} s</span>
+              </label>
+              <input
+                type="range" min={0} max={1.5} step={0.1}
+                value={saved.pause}
+                onChange={(e) => { const p = parseFloat(e.target.value); setSaved({ ...saved, pause: p }); }}
+                onMouseUp={(e) => savePause(parseFloat((e.target as HTMLInputElement).value))}
+                onTouchEnd={(e) => savePause(parseFloat((e.target as HTMLInputElement).value))}
+                className="w-full"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Te presety są używane automatycznie przy generowaniu podcastu (Monolog i Dialog).
+            </p>
           </div>
         )}
       </div>
