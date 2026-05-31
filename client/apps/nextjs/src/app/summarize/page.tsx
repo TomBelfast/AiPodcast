@@ -131,7 +131,7 @@ export default function SummarizePage() {
         try {
           const s = await fetch("/api/tts-status").then(r => r.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
           setPodcast(prev => prev.status === "loading"
-            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs }
+            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs ?? [] }
             : prev
           );
           if (s.state === "idle") {
@@ -181,7 +181,7 @@ export default function SummarizePage() {
         try {
           const s = await fetch("/api/tts-status").then(r => r.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
           setPodcast(prev => prev.status === "loading"
-            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs }
+            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs ?? [] }
             : prev);
           if (s.state === "idle") {
             stopPolling();
