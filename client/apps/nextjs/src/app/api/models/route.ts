@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
-import { cfg } from "../_lib/llm";
+import { getActive } from "../_lib/provider";
 
-// Proxy do listy modeli lokalnego API (OpenAI-compatible /models).
+// Proxy do listy modeli AKTYWNEGO providera (OpenAI-compatible /models).
 export async function GET() {
-  const base = cfg("LLM_API_URL");
-  const key = cfg("LLM_API_KEY");
-  if (!base) return NextResponse.json({ models: [] });
+  const p = getActive();
+  if (!p.baseUrl) return NextResponse.json({ models: [] });
   try {
-    const res = await fetch(`${base}/models`, {
-      headers: { Authorization: `Bearer ${key}` },
+    const res = await fetch(`${p.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${p.apiKey}` },
       cache: "no-store",
     });
     if (!res.ok) return NextResponse.json({ models: [] });

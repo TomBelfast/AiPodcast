@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { eq } from "@acme/db";
-import { cfg, readEnv, getModel } from "../_lib/llm";
+import { readEnv } from "../_lib/llm";
+import { getActive } from "../_lib/provider";
 import { readSettings } from "../_lib/settings";
 import { buildDialoguePrompt, readDialogue, type Host } from "../_lib/dialogue";
 import { wavToMp3 } from "../_lib/audio";
@@ -34,17 +35,16 @@ function parseDialogue(raw: string, hostA: Host, hostB: Host): Segment[] {
 }
 
 async function generateDialogueScript(summaryText: string): Promise<Segment[]> {
-  const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
-  const apiKey = cfg("LLM_API_KEY");
-  const model  = getModel();
+  const p = getActive();
+  const apiUrl = p.baseUrl + "/chat/completions";
   const d = readDialogue();
   const { system, user, hostA, hostB } = buildDialoguePrompt(summaryText);
 
   const res = await fetch(apiUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${p.apiKey}` },
     body: JSON.stringify({
-      model,
+      model: p.model,
       messages: [
         { role: "system", content: system },
         { role: "user",   content: user },

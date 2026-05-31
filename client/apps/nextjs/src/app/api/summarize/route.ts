@@ -5,7 +5,7 @@ import { NextResponse } from "next/server";
 import { db } from "@acme/db/client";
 import { summary } from "@acme/db/schema";
 import { getPrompt } from "../_lib/prompts";
-import { getModel } from "../_lib/llm";
+import { getActive } from "../_lib/provider";
 
 function readEnv(): Record<string, string> {
   try {
@@ -46,12 +46,11 @@ async function fetchTranscript(videoUrl: string): Promise<{ text: string; title:
 }
 
 async function callLLM(transcript: string, style: string): Promise<string> {
-  const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
-  const apiKey = cfg("LLM_API_KEY");
-  const model  = getModel();
+  const p = getActive();
+  const apiUrl = p.baseUrl + "/chat/completions";
 
-  if (!cfg("LLM_API_URL") || !apiKey) {
-    throw new Error("LLM_API_URL i LLM_API_KEY muszą być skonfigurowane w .env");
+  if (!p.baseUrl || !p.apiKey) {
+    throw new Error("Provider LLM nie jest skonfigurowany");
   }
 
   const { system, user } = getPrompt(style, transcript);
@@ -60,10 +59,10 @@ async function callLLM(transcript: string, style: string): Promise<string> {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
+      "Authorization": `Bearer ${p.apiKey}`,
     },
     body: JSON.stringify({
-      model,
+      model: p.model,
       messages: [
         { role: "system", content: system },
         { role: "user",   content: user },

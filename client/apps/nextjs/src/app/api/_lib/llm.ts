@@ -1,62 +1,30 @@
-import fs from "fs";
-import path from "path";
+import { cfg, readEnv } from "./env";
+import { getActive } from "./provider";
 
-/** Czyta zmienne z pliku .env (fallback gdy process.env nieaktualne). */
-export function readEnv(): Record<string, string> {
-  try {
-    const p = path.resolve(process.cwd(), "../../.env");
-    const out: Record<string, string> = {};
-    for (const line of fs.readFileSync(p, "utf8").split("\n")) {
-      const m = line.match(/^([A-Z_]+)=['"]?(.+?)['"]?\s*$/);
-      if (m) out[m[1]!] = m[2]!;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
+export { cfg, readEnv };
 
-export function cfg(key: string, fallback = ""): string {
-  return process.env[key] || readEnv()[key] || fallback;
-}
-
-const LLM_SETTINGS_PATH = "/app/llm-settings.json";
-
-export function readLlmSettings(): { model: string } {
-  try {
-    return JSON.parse(fs.readFileSync(LLM_SETTINGS_PATH, "utf8")) as { model: string };
-  } catch {
-    return { model: "" };
-  }
-}
-
-export function writeLlmSettings(s: { model: string }): void {
-  fs.writeFileSync(LLM_SETTINGS_PATH, JSON.stringify(s, null, 2));
-}
-
-/** Wybrany model LLM: ustawienie z pliku → .env → domyślny. */
+/** Wybrany model LLM (aktywnego providera). */
 export function getModel(): string {
-  return readLlmSettings().model || cfg("LLM_MODEL", "gemini-2.5-flash");
+  return getActive().model || cfg("LLM_MODEL", "gemini-2.5-flash");
 }
 
-/** Wywołanie LLM (OpenAI-compatible chat/completions). */
+/** Wywołanie LLM (OpenAI-compatible chat/completions) na aktywnym providerze. */
 export async function callLLM(
   messages: { role: string; content: string }[],
   opts: { temperature?: number; maxTokens?: number } = {},
 ): Promise<string> {
-  const apiUrl = cfg("LLM_API_URL") + "/chat/completions";
-  const apiKey = cfg("LLM_API_KEY");
-  const model = getModel();
+  const p = getActive();
+  const apiUrl = p.baseUrl + "/chat/completions";
 
-  if (!cfg("LLM_API_URL") || !apiKey) {
-    throw new Error("LLM_API_URL i LLM_API_KEY muszą być skonfigurowane w .env");
+  if (!p.baseUrl || !p.apiKey) {
+    throw new Error("Provider LLM nie jest skonfigurowany (baseUrl/apiKey)");
   }
 
   const res = await fetch(apiUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.apiKey}` },
     body: JSON.stringify({
-      model,
+      model: p.model,
       messages,
       temperature: opts.temperature ?? 0.4,
       max_tokens: opts.maxTokens ?? 2048,

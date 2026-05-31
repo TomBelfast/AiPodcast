@@ -51,23 +51,82 @@ export default function SummarizePage() {
   // token anulowania aktywnego pollera (zamiast setInterval — jeden, kontrolowany)
   const pollRef = useRef<{ cancelled: boolean } | null>(null);
 
-  // wybór modelu LLM
+  // provider + model LLM
+  interface ProviderInfo { label: string; baseUrl: string; model: string; hasKey: boolean }
+  const [providers, setProviders] = useState<Record<string, ProviderInfo>>({});
+  const [activeProvider, setActiveProvider] = useState<string>("");
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState<string>("");
+  const [providerModal, setProviderModal] = useState<{
+    id: string; label: string; baseUrl: string; apiKey: string; model: string; isNew: boolean; saving: boolean;
+  } | null>(null);
 
-  useEffect(() => {
-    void fetch("/api/models").then(r => r.json()).then((d: { models: string[] }) => setModels(d.models ?? [])).catch(() => {});
-    void fetch("/api/llm-settings").then(r => r.json()).then((d: { model: string }) => setModel(d.model ?? "")).catch(() => {});
-  }, []);
+  useEffect(() => { void loadProviders(); }, []);
+
+  async function loadProviders() {
+    try {
+      const d = await fetch("/api/providers").then(r => r.json()) as { active: string; providers: Record<string, ProviderInfo> };
+      setProviders(d.providers ?? {});
+      setActiveProvider(d.active ?? "");
+      await loadModels();
+    } catch {}
+  }
+
+  async function loadModels() {
+    try {
+      const m = await fetch("/api/models").then(r => r.json()) as { models: string[] };
+      setModels(m.models ?? []);
+    } catch {}
+    try {
+      const s = await fetch("/api/llm-settings").then(r => r.json()) as { model: string };
+      setModel(s.model ?? "");
+    } catch {}
+  }
+
+  async function changeProvider(id: string) {
+    setActiveProvider(id);
+    try {
+      await fetch("/api/providers", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "setActive", id }),
+      });
+      await loadModels();
+    } catch {}
+  }
 
   async function changeModel(m: string) {
     setModel(m);
     try {
       await fetch("/api/llm-settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: m }),
       });
+    } catch {}
+  }
+
+  async function saveProvider() {
+    if (!providerModal) return;
+    setProviderModal({ ...providerModal, saving: true });
+    try {
+      await fetch("/api/providers", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save", id: providerModal.id, label: providerModal.label, baseUrl: providerModal.baseUrl, apiKey: providerModal.apiKey, model: providerModal.model }),
+      });
+      setProviderModal(null);
+      await loadProviders();
+    } catch {
+      setProviderModal({ ...providerModal, saving: false });
+    }
+  }
+
+  async function deleteProvider(id: string) {
+    try {
+      await fetch("/api/providers", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", id }),
+      });
+      setProviderModal(null);
+      await loadProviders();
     } catch {}
   }
 
@@ -368,9 +427,28 @@ export default function SummarizePage() {
             </Link>
           </div>
 
-          {/* Model LLM */}
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-muted-foreground shrink-0">🧠 Model:</label>
+          {/* Provider + Model LLM */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-sm text-muted-foreground shrink-0">🌐 Provider:</label>
+            <select
+              value={activeProvider}
+              onChange={(e) => changeProvider(e.target.value)}
+              className="border-input bg-background h-9 rounded-md border px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {Object.entries(providers).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}
+            </select>
+            <button
+              onClick={() => { const p = providers[activeProvider]; setProviderModal({ id: activeProvider, label: p?.label ?? "", baseUrl: p?.baseUrl ?? "", apiKey: "", model: p?.model ?? "", isNew: false, saving: false }); }}
+              title="Edytuj providera"
+              className="h-9 px-2 rounded-md border text-sm hover:bg-muted"
+            >⚙️</button>
+            <button
+              onClick={() => setProviderModal({ id: "", label: "", baseUrl: "", apiKey: "", model: "", isNew: true, saving: false })}
+              title="Dodaj providera"
+              className="h-9 px-2 rounded-md border text-sm hover:bg-muted"
+            >＋</button>
+
+            <label className="text-sm text-muted-foreground shrink-0 ml-2">🧠 Model:</label>
             <select
               value={model}
               onChange={(e) => changeModel(e.target.value)}
@@ -379,7 +457,7 @@ export default function SummarizePage() {
               {model && !models.includes(model) && <option value={model}>{model}</option>}
               {models.map((m) => <option key={m} value={m}>{m}</option>)}
             </select>
-            <span className="text-xs text-muted-foreground">({models.length} dostępnych)</span>
+            <span className="text-xs text-muted-foreground">({models.length})</span>
           </div>
 
           {/* Styl podsumowania */}
@@ -742,6 +820,68 @@ export default function SummarizePage() {
                 <button onClick={() => saveDialogue(false)} disabled={dialogueEditor.saving}
                   className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 text-sm font-medium disabled:opacity-50">
                   {dialogueEditor.saving ? "Zapisuję…" : "💾 Zapisz"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal providera */}
+      {providerModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => !providerModal.saving && setProviderModal(null)}
+        >
+          <div className="bg-background rounded-lg border shadow-xl w-full max-w-lg p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">🌐 {providerModal.isNew ? "Dodaj providera" : "Edytuj providera"}</h3>
+              <button onClick={() => setProviderModal(null)} className="text-muted-foreground hover:text-foreground">✕</button>
+            </div>
+
+            {providerModal.isNew && (
+              <div>
+                <label className="text-sm font-medium block mb-1">ID (unikalne, np. openai)</label>
+                <input value={providerModal.id} onChange={(e) => setProviderModal({ ...providerModal, id: e.target.value.replace(/\s+/g, "-").toLowerCase() })}
+                  className="border-input bg-background w-full h-10 rounded-md border px-3 text-sm" placeholder="openai" />
+              </div>
+            )}
+            <div>
+              <label className="text-sm font-medium block mb-1">Nazwa</label>
+              <input value={providerModal.label} onChange={(e) => setProviderModal({ ...providerModal, label: e.target.value })}
+                className="border-input bg-background w-full h-10 rounded-md border px-3 text-sm" placeholder="OpenAI" />
+            </div>
+            <div>
+              <label className="text-sm font-medium block mb-1">Base URL (OpenAI-compatible, …/v1)</label>
+              <input value={providerModal.baseUrl} onChange={(e) => setProviderModal({ ...providerModal, baseUrl: e.target.value })}
+                className="border-input bg-background w-full h-10 rounded-md border px-3 text-sm font-mono" placeholder="https://api.openai.com/v1" />
+            </div>
+            <div>
+              <label className="text-sm font-medium block mb-1">
+                API Key {!providerModal.isNew && <span className="text-xs text-muted-foreground">(zostaw puste, by nie zmieniać)</span>}
+              </label>
+              <input type="password" value={providerModal.apiKey} onChange={(e) => setProviderModal({ ...providerModal, apiKey: e.target.value })}
+                className="border-input bg-background w-full h-10 rounded-md border px-3 text-sm font-mono" placeholder="sk-…" />
+            </div>
+            <div>
+              <label className="text-sm font-medium block mb-1">Domyślny model (opcjonalnie)</label>
+              <input value={providerModal.model} onChange={(e) => setProviderModal({ ...providerModal, model: e.target.value })}
+                className="border-input bg-background w-full h-10 rounded-md border px-3 text-sm font-mono" placeholder="gpt-4o" />
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-2">
+              {!providerModal.isNew && Object.keys(providers).length > 1 ? (
+                <button onClick={() => deleteProvider(providerModal.id)} disabled={providerModal.saving}
+                  className="text-sm text-muted-foreground hover:text-destructive underline underline-offset-2 disabled:opacity-50">
+                  Usuń providera
+                </button>
+              ) : <span />}
+              <div className="flex gap-2">
+                <button onClick={() => setProviderModal(null)} disabled={providerModal.saving}
+                  className="inline-flex h-10 items-center rounded-md border px-4 text-sm font-medium hover:bg-muted disabled:opacity-50">Anuluj</button>
+                <button onClick={saveProvider} disabled={providerModal.saving || !providerModal.id || !providerModal.baseUrl}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 text-sm font-medium disabled:opacity-50">
+                  {providerModal.saving ? "Zapisuję…" : "💾 Zapisz"}
                 </button>
               </div>
             </div>
