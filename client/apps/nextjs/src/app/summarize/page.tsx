@@ -152,10 +152,9 @@ export default function SummarizePage() {
   }
 
   function formatDate(iso: string) {
-    return new Date(iso).toLocaleString("pl-PL", {
-      day: "2-digit", month: "2-digit", year: "numeric",
-      hour: "2-digit", minute: "2-digit",
-    });
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
   const activeSummary = summary.status === "done" ? summary : null;
