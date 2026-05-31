@@ -156,6 +156,54 @@ export default function SummarizePage() {
     void pollUntilDone();
   }
 
+  async function handleGenerateDialogue(text: string, id?: string) {
+    setPodcast({ status: "loading", message: "Generowanie skryptu dialogu (LLM)…", logs: [] });
+    try {
+      const res = await fetch("/api/podcast-dialogue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ summaryText: text, summaryId: id }),
+      });
+      if (!res.ok) {
+        const e = (await res.json()) as { error?: string };
+        setPodcast({ status: "error", message: e.error ?? "Błąd" }); return;
+      }
+    } catch (err) {
+      setPodcast({ status: "error", message: String(err) }); return;
+    }
+
+    setPodcast({ status: "loading", message: "LLM pisze skrypt, TTS generuje dialog Ania + Marek…", logs: [] });
+    startPolling();
+
+    const pollUntilDone = async () => {
+      for (let i = 0; i < 600; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const s = await fetch("/api/tts-status").then(r => r.json()) as { state: string; message: string; elapsed_s: number | null; device: string; logs: string[] };
+          setPodcast(prev => prev.status === "loading"
+            ? { status: "loading", message: s.message, elapsed: s.elapsed_s ?? undefined, device: s.device, logs: s.logs }
+            : prev);
+          if (s.state === "idle") {
+            stopPolling();
+            await new Promise(r => setTimeout(r, 800));
+            const hist = await fetch("/api/history").then(r => r.json()) as { history: HistoryItem[] };
+            const item = id ? hist.history.find(h => h.id === id) : hist.history[0];
+            if (item?.podcastPath) {
+              setHistory(hist.history);
+              setPodcast({ status: "done", url: item.podcastPath });
+            } else {
+              setHistory(hist.history);
+              setPodcast({ status: "error", message: "Plik nie pojawił się w historii" });
+            }
+            return;
+          }
+        } catch {}
+      }
+      stopPolling();
+    };
+    void pollUntilDone();
+  }
+
   function loadFromHistory(item: HistoryItem) {
     setUrl(item.youtubeUrl);
     setSummaryStyle((item.summaryStyle as StyleId) ?? "encyclopedic");
@@ -306,7 +354,15 @@ export default function SummarizePage() {
                   disabled={podcast.status === "loading"}
                   className="bg-secondary text-secondary-foreground hover:bg-secondary/80 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
                 >
-                  {podcast.status === "loading" ? "⏳ Generuję…" : "🎙 Generuj podcast"}
+                  {podcast.status === "loading" ? "⏳ Generuję…" : "🎙 Monolog"}
+                </button>
+
+                <button
+                  onClick={() => handleGenerateDialogue(activeSummary.text, activeSummary.id)}
+                  disabled={podcast.status === "loading"}
+                  className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  {podcast.status === "loading" ? "⏳ Generuję…" : "🎭 Dialog (Ania + Marek)"}
                 </button>
               </div>
 

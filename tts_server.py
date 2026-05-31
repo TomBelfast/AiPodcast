@@ -81,6 +81,71 @@ def get_tts(model: str = "supertonic-3"):
 
 AVAILABLE_VOICES = ["M1", "M2", "F1", "F2"]
 
+# Mapowanie nazw hostów na głosy (można nadpisać w requescie)
+DEFAULT_HOST_VOICES = {"ania": "F1", "marek": "M1"}
+
+def _wav_to_array(wav_bytes: bytes):
+    """Wczytuje WAV bytes → numpy array (float32, mono)."""
+    import io, wave, numpy as np
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        frames = wf.readframes(wf.getnframes())
+        sample_rate = wf.getframerate()
+        sampwidth = wf.getsampwidth()
+        dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sampwidth, np.int16)
+        arr = np.frombuffer(frames, dtype=dtype).astype(np.float32)
+        if sampwidth == 2:
+            arr /= 32768.0
+        elif sampwidth == 4:
+            arr /= 2147483648.0
+    return arr, sample_rate
+
+def _array_to_wav(arr, sample_rate: int) -> bytes:
+    """numpy float32 array → WAV bytes."""
+    import io, wave, numpy as np
+    pcm = (arr * 32767).clip(-32768, 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+def _do_synthesize_dialogue(segments: list, voices: dict, model: str = "supertonic-3") -> bytes:
+    """
+    Generuje audio dla listy {speaker, text}, skleja w jeden WAV.
+    voices: {"ania": "F1", "marek": "M1"}
+    """
+    import numpy as np
+    tts = get_tts(model)
+    silence_samples = int(tts.sample_rate * 0.4)  # 400ms ciszy między kwestiami
+    silence = np.zeros(silence_samples, dtype=np.float32)
+
+    arrays = []
+    total = len(segments)
+    for i, seg in enumerate(segments):
+        speaker = (seg.get("speaker") or "ania").lower()
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        voice_name = voices.get(speaker) or DEFAULT_HOST_VOICES.get(speaker, "F1")
+        _set_status("generating", f"Segment {i+1}/{total} — {speaker} ({voice_name}): {text[:50]}…")
+        voice_style = tts.get_voice_style(voice_name=voice_name)
+        wav, _ = tts.synthesize(text=text, voice_style=voice_style, lang="na")
+        # wav shape: (1, samples) — flatten to 1D
+        arr = wav[0] if hasattr(wav, '__len__') and len(wav.shape) > 1 else wav
+        arrays.append(arr.astype(np.float32))
+        arrays.append(silence)
+
+    if not arrays:
+        raise ValueError("Brak segmentów do syntezy")
+
+    combined = np.concatenate(arrays)
+    _set_status("saving", "Sklejanie i zapis WAV…")
+    result = _array_to_wav(combined, tts.sample_rate)
+    _set_status("idle", f"Podcast gotowy — {len(combined)/tts.sample_rate:.1f}s, {len(result)//1024} KB")
+    return result
+
 def _do_synthesize(text: str, voice: str, model: str, lang: str = "na") -> bytes:
     _set_status("generating", f"Synteza mowy — {len(text)} znaków, głos {voice}, język {lang}…")
     tts = get_tts(model)
@@ -142,41 +207,57 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json(404, {"error": "not found"})
 
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(length))
+
+    def _send_audio(self, audio: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(audio)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(audio)
+
     def do_POST(self):
-        if self.path != "/synthesize":
+        try:
+            body = self._read_body()
+        except Exception as e:
+            self.send_json(400, {"error": f"bad request: {e}"}); return
+
+        if self.path == "/synthesize":
+            text  = (body.get("text") or "").strip()
+            voice = body.get("voice", "F1")
+            model = body.get("model", "supertonic-3")
+            lang  = body.get("lang", "na")
+            if not text:
+                self.send_json(400, {"error": "text is required"}); return
+            if voice not in AVAILABLE_VOICES:
+                self.send_json(400, {"error": f"voice must be one of {AVAILABLE_VOICES}"}); return
+            try:
+                self._send_audio(_do_synthesize(text, voice, model, lang))
+            except Exception as e:
+                log.exception("synthesize failed")
+                _set_status("idle", f"Błąd: {e}")
+                self.send_json(500, {"error": str(e)})
+
+        elif self.path == "/podcast":
+            # { segments: [{speaker, text}, ...], voices: {ania: "F1", marek: "M1"} }
+            segments = body.get("segments") or []
+            voices   = {k.lower(): v for k, v in (body.get("voices") or {}).items()}
+            voices   = {**DEFAULT_HOST_VOICES, **voices}
+            model    = body.get("model", "supertonic-3")
+            if not segments:
+                self.send_json(400, {"error": "segments is required"}); return
+            try:
+                self._send_audio(_do_synthesize_dialogue(segments, voices, model))
+            except Exception as e:
+                log.exception("podcast failed")
+                _set_status("idle", f"Błąd: {e}")
+                self.send_json(500, {"error": str(e)})
+
+        else:
             self.send_json(404, {"error": "not found"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-        except Exception as e:
-            self.send_json(400, {"error": f"bad request: {e}"})
-            return
-
-        text  = (body.get("text") or "").strip()
-        voice = body.get("voice", "F1")
-        model = body.get("model", "supertonic-3")
-        lang  = body.get("lang", "na")
-
-        if not text:
-            self.send_json(400, {"error": "text is required"}); return
-        if voice not in AVAILABLE_VOICES:
-            self.send_json(400, {"error": f"voice must be one of {AVAILABLE_VOICES}"}); return
-
-        try:
-            audio = _do_synthesize(text, voice, model, lang)
-            self.send_response(200)
-            self.send_header("Content-Type", "audio/wav")
-            self.send_header("Content-Length", str(len(audio)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(audio)
-        except ImportError:
-            self.send_json(503, {"error": "supertonic not installed"})
-        except Exception as e:
-            log.exception("synthesize failed")
-            _set_status("idle", f"Błąd: {e}")
-            self.send_json(500, {"error": str(e)})
 
 
 if __name__ == "__main__":
