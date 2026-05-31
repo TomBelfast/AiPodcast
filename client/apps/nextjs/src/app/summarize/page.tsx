@@ -7,7 +7,7 @@ const STYLES = [
   { id: "short",        label: "⚡ Bardzo krótkie",  desc: "Maks 5 zdań, tylko esencja" },
   { id: "simple",       label: "👶 Dla laika",        desc: "Bez żargonu, z analogiami" },
   { id: "tv",           label: "📺 Wiadomości TV",   desc: "Dziennikarski, neutralny" },
-  { id: "podcast",      label: "🎙 Podcast (Rogan)", desc: "Luźny, entuzjastyczny" },
+  { id: "podcast",      label: "😎 Gawęda (Rogan)",  desc: "Luźny, entuzjastyczny monolog" },
 ] as const;
 
 type StyleId = typeof STYLES[number]["id"];
@@ -222,6 +222,15 @@ export default function SummarizePage() {
 
   const activeSummary = summary.status === "done" ? summary : null;
 
+  // Jeśli oglądane podsumowanie ma już zapisane audio (a poll zginął przy
+  // nawigacji/odświeżeniu) — pokaż player automatycznie.
+  useEffect(() => {
+    if (summary.status !== "done" || !summary.id) return;
+    if (podcast.status === "loading" || podcast.status === "done") return;
+    const h = history.find(x => x.id === summary.id);
+    if (h?.podcastPath) setPodcast({ status: "done", url: h.podcastPath });
+  }, [summary, history, podcast.status]);
+
   return (
     <div className="bg-background min-h-screen flex">
       {/* Historia — panel lewy */}
@@ -335,34 +344,40 @@ export default function SummarizePage() {
                 </div>
               </div>
 
-              {/* Podcast controls */}
-              <div className="flex items-center gap-3 flex-wrap">
-                <select
-                  value={voice}
-                  onChange={(e) => setVoice(e.target.value)}
-                  className="border-input bg-background h-10 rounded-md border px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <option value="M1">Głos M1 (mężczyzna)</option>
-                  <option value="M2">Głos M2 (mężczyzna)</option>
-                  <option value="F1">Głos F1 (kobieta)</option>
-                  <option value="F2">Głos F2 (kobieta)</option>
-                </select>
+              {/* Generowanie audio (podcast) */}
+              <div className="border-t border-border pt-4">
+                <p className="text-sm font-semibold mb-1">🔊 Wygeneruj audio z tego podsumowania</p>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Powyższy tekst zamienimy na mowę. Wybierz wariant — gotowe audio pojawi się poniżej i w historii (🎙).
+                </p>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <select
+                    value={voice}
+                    onChange={(e) => setVoice(e.target.value)}
+                    className="border-input bg-background h-10 rounded-md border px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="M1">Głos M1 (mężczyzna)</option>
+                    <option value="M2">Głos M2 (mężczyzna)</option>
+                    <option value="F1">Głos F1 (kobieta)</option>
+                    <option value="F2">Głos F2 (kobieta)</option>
+                  </select>
 
-                <button
-                  onClick={() => handleGeneratePodcast(activeSummary.text, activeSummary.id)}
-                  disabled={podcast.status === "loading"}
-                  className="bg-secondary text-secondary-foreground hover:bg-secondary/80 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
-                >
-                  {podcast.status === "loading" ? "⏳ Generuję…" : "🎙 Monolog"}
-                </button>
+                  <button
+                    onClick={() => handleGeneratePodcast(activeSummary.text, activeSummary.id)}
+                    disabled={podcast.status === "loading"}
+                    className="bg-secondary text-secondary-foreground hover:bg-secondary/80 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+                  >
+                    {podcast.status === "loading" ? "⏳ Generuję…" : "🎙 Monolog (1 głos)"}
+                  </button>
 
-                <button
-                  onClick={() => handleGenerateDialogue(activeSummary.text, activeSummary.id)}
-                  disabled={podcast.status === "loading"}
-                  className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
-                >
-                  {podcast.status === "loading" ? "⏳ Generuję…" : "🎭 Dialog (Ania + Marek)"}
-                </button>
+                  <button
+                    onClick={() => handleGenerateDialogue(activeSummary.text, activeSummary.id)}
+                    disabled={podcast.status === "loading"}
+                    className="bg-primary text-primary-foreground hover:bg-primary/90 inline-flex h-10 items-center rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50"
+                  >
+                    {podcast.status === "loading" ? "⏳ Generuję…" : "🎭 Dialog (Ania + Marek)"}
+                  </button>
+                </div>
               </div>
 
               {podcast.status === "loading" && (
