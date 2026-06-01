@@ -221,6 +221,7 @@ export const summary = pgTable("summary", (t) => ({
   summaryText: t.text().notNull(),
   podcastPath: t.text(),
   summaryStyle: t.varchar({ length: 32 }).notNull().default("encyclopedic"),
+  descriptionLinks: t.jsonb().$type<string[]>(),
   createdAt: t.timestamp({ withTimezone: true }).defaultNow().notNull(),
 }));
 

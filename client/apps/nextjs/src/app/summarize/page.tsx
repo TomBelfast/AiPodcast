@@ -20,7 +20,7 @@ function styleLabel(id: string) {
 type SummaryState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "done"; text: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string; transcript?: string }
+  | { status: "done"; text: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string; transcript?: string; descriptionLinks?: string[] }
   | { status: "error"; message: string };
 
 type PodcastState =
@@ -37,6 +37,7 @@ interface HistoryItem {
   transcript: string;
   podcastPath: string | null;
   summaryStyle: string;
+  descriptionLinks: string[] | null;
   createdAt: string;
 }
 
@@ -335,11 +336,11 @@ export default function SummarizePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim(), summaryStyle }),
       });
-      const data = (await res.json()) as { summary?: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string; transcript?: string; error?: string };
+      const data = (await res.json()) as { summary?: string; id?: string; title?: string; youtubeUrl?: string; summaryStyle?: string; transcript?: string; descriptionLinks?: string[]; error?: string };
       if (!res.ok || data.error) {
         setSummary({ status: "error", message: data.error ?? "Nieznany błąd" });
       } else {
-        setSummary({ status: "done", text: data.summary ?? "", id: data.id, title: data.title, youtubeUrl: data.youtubeUrl, summaryStyle: data.summaryStyle, transcript: data.transcript });
+        setSummary({ status: "done", text: data.summary ?? "", id: data.id, title: data.title, youtubeUrl: data.youtubeUrl, summaryStyle: data.summaryStyle, transcript: data.transcript, descriptionLinks: data.descriptionLinks });
         void loadHistory();
       }
     } catch (err) {
@@ -387,7 +388,7 @@ export default function SummarizePage() {
     cancelPoll();
     setUrl(item.youtubeUrl);
     setSummaryStyle((item.summaryStyle as StyleId) ?? "encyclopedic");
-    setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl, summaryStyle: item.summaryStyle, transcript: item.transcript });
+    setSummary({ status: "done", text: item.summaryText, id: item.id, title: item.title, youtubeUrl: item.youtubeUrl, summaryStyle: item.summaryStyle, transcript: item.transcript, descriptionLinks: item.descriptionLinks ?? undefined });
     if (item.podcastPath) {
       setPodcast({ status: "done", url: item.podcastPath });
     } else {
@@ -503,6 +504,7 @@ export default function SummarizePage() {
               value={activeProvider}
               onChange={(e) => changeProvider(e.target.value)}
               className="border-input bg-background h-9 rounded-md border px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              suppressHydrationWarning
             >
               {Object.entries(providers).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}
             </select>
@@ -522,6 +524,7 @@ export default function SummarizePage() {
               value={model}
               onChange={(e) => changeModel(e.target.value)}
               className="border-input bg-background h-9 rounded-md border px-2 text-sm max-w-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              suppressHydrationWarning
             >
               {model && !models.includes(model) && <option value={model}>{model}</option>}
               {models.map((m) => <option key={m} value={m}>{m}</option>)}
@@ -606,7 +609,34 @@ export default function SummarizePage() {
                 </details>
               )}
 
-              {/* 2) Podsumowanie */}
+              {/* 2) Linki z opisu */}
+              {activeSummary.descriptionLinks && activeSummary.descriptionLinks.length > 0 && (
+                <details className="bg-card rounded-lg border group">
+                  <summary className="cursor-pointer select-none px-5 py-3 text-sm font-semibold flex items-center gap-2 list-none">
+                    <span className="transition-transform group-open:rotate-90">▶</span>
+                    <span>🔗 Linki z opisu</span>
+                    <span className="text-xs font-normal text-muted-foreground ml-1">
+                      ({activeSummary.descriptionLinks.length} — kliknij aby rozwinąć)
+                    </span>
+                  </summary>
+                  <ul className="px-5 pb-5 pt-3 border-t border-border space-y-2">
+                    {activeSummary.descriptionLinks.map((link) => (
+                      <li key={link} className="text-sm truncate">
+                        <a
+                          href={link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-500 hover:text-blue-400 hover:underline underline-offset-2 break-all"
+                        >
+                          {link}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+
+              {/* 3) Podsumowanie */}
               <div className="bg-card rounded-lg border p-5">
                 <div className="flex items-start justify-between gap-3 mb-3">
                   <div>

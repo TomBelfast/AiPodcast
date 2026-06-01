@@ -18,6 +18,7 @@ export async function GET() {
         transcript: summary.transcript,
         podcastPath: summary.podcastPath,
         summaryStyle: summary.summaryStyle,
+        descriptionLinks: summary.descriptionLinks,
         createdAt: summary.createdAt,
       })
       .from(summary)
