@@ -159,7 +159,7 @@ function sanitizeSettings(value: unknown): PodcastStylePreviewSettings {
     previewMode: readOption(value.previewMode, ['title', 'captions'] as const, ESTABLISHED_STYLE_PRESET.previewMode),
     titleSize: readNumber(value.titleSize, ESTABLISHED_STYLE_PRESET.titleSize, 28, 58),
     titleMarginX: readNumber(value.titleMarginX, ESTABLISHED_STYLE_PRESET.titleMarginX, 0, 46),
-    titleOffsetY: readNumber(value.titleOffsetY, ESTABLISHED_STYLE_PRESET.titleOffsetY, -120, 120),
+    titleOffsetY: readNumber(value.titleOffsetY, ESTABLISHED_STYLE_PRESET.titleOffsetY, -450, 450),
     arcSize: readNumber(value.arcSize, ESTABLISHED_STYLE_PRESET.arcSize, 18, 42),
     arcOffsetY: readNumber(value.arcOffsetY, ESTABLISHED_STYLE_PRESET.arcOffsetY, -28, 40),
     arcMargin: readNumber(value.arcMargin, ESTABLISHED_STYLE_PRESET.arcMargin, 0, 96),
@@ -502,7 +502,7 @@ export function PodcastStylePreview({
             <div className="podcast-style-range-grid">
               <RangeControl label="Tytuł" value={settings.titleSize} min={28} max={58} suffix="px" onChange={(value) => updateSetting('titleSize', value)} note={fittedTitleSize < settings.titleSize ? `auto ${fittedTitleSize}px` : undefined} />
               <RangeControl label="Margines L/R" value={settings.titleMarginX} min={0} max={46} suffix="px" onChange={(value) => updateSetting('titleMarginX', value)} />
-              <RangeControl label="Środek Y" value={settings.titleOffsetY} min={-120} max={120} suffix="px" onChange={(value) => updateSetting('titleOffsetY', value)} signed />
+              <RangeControl label="Środek Y" value={settings.titleOffsetY} min={-450} max={450} suffix="px" onChange={(value) => updateSetting('titleOffsetY', value)} signed />
               <RangeControl label="Góra" value={settings.arcSize} min={18} max={42} suffix="px" onChange={(value) => updateSetting('arcSize', value)} />
               <RangeControl label="Łuk Y" value={settings.arcOffsetY} min={-28} max={40} suffix="px" onChange={(value) => updateSetting('arcOffsetY', value)} signed />
               <RangeControl label="Łuk margines" value={settings.arcMargin} min={0} max={96} suffix="px" onChange={(value) => updateSetting('arcMargin', value)} />
