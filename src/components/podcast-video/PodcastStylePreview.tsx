@@ -241,6 +241,8 @@ export function PodcastStylePreview({
   const [settings, setSettings] = useState<PodcastStylePreviewSettings>(ESTABLISHED_STYLE_PRESET);
   const [status, setStatus] = useState<string>('Preset załadowany. Możesz zmienić wartości i zapisać je jako domyślne.');
   const [fittedTitleSize, setFittedTitleSize] = useState(settings.titleSize);
+  const [showTopText, setShowTopText] = useState(true);
+  const [showScriptText, setShowScriptText] = useState(true);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const mainTitleRef = useRef<HTMLDivElement | null>(null);
 
@@ -411,14 +413,56 @@ export function PodcastStylePreview({
             </div>
             <div className="podcast-style-field-grid">
               <label>
-                Górny tytuł
+                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  Górny tytuł
+                  <button
+                    type="button"
+                    onClick={() => setShowTopText((v) => !v)}
+                    title={showTopText ? 'Ukryj warstwę' : 'Pokaż warstwę'}
+                    style={{
+                      padding: '2px 8px',
+                      fontSize: '10px',
+                      fontWeight: 600,
+                      borderRadius: '4px',
+                      border: '1px solid',
+                      cursor: 'pointer',
+                      background: showTopText ? 'rgba(37,255,0,0.15)' : 'rgba(239,68,68,0.15)',
+                      borderColor: showTopText ? '#25FF00' : '#ef4444',
+                      color: showTopText ? '#25FF00' : '#ef4444',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {showTopText ? '● WIDOCZNA' : '○ UKRYTA'}
+                  </button>
+                </span>
                 <input
                   value={settings.topText}
                   onChange={(event) => updateSetting('topText', event.target.value)}
                 />
               </label>
               <label>
-                Podpis
+                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  Podpis
+                  <button
+                    type="button"
+                    onClick={() => setShowScriptText((v) => !v)}
+                    title={showScriptText ? 'Ukryj warstwę' : 'Pokaż warstwę'}
+                    style={{
+                      padding: '2px 8px',
+                      fontSize: '10px',
+                      fontWeight: 600,
+                      borderRadius: '4px',
+                      border: '1px solid',
+                      cursor: 'pointer',
+                      background: showScriptText ? 'rgba(37,255,0,0.15)' : 'rgba(239,68,68,0.15)',
+                      borderColor: showScriptText ? '#25FF00' : '#ef4444',
+                      color: showScriptText ? '#25FF00' : '#ef4444',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {showScriptText ? '● WIDOCZNA' : '○ UKRYTA'}
+                  </button>
+                </span>
                 <input
                   value={settings.scriptText}
                   onChange={(event) => updateSetting('scriptText', event.target.value)}
@@ -510,15 +554,19 @@ export function PodcastStylePreview({
               <div className="podcast-style-poster-shade" />
               <div className="podcast-style-title-mask" />
               <div className={`podcast-style-title-layer layout-${settings.coverLayout}`}>
-                <svg className="podcast-style-arc-svg" viewBox="-64 -46 488 158" role="img" aria-label="Górny tytuł covera">
-                  <path id="podcast-style-arc-path" d={`M ${arcStartX} 82 Q 180 ${arcControlY} ${arcEndX} 82`} fill="none" />
-                  <text className="podcast-style-arc-text" textAnchor="middle">
-                    <textPath href="#podcast-style-arc-path" startOffset="50%" textLength={settings.arcWidth} lengthAdjust="spacingAndGlyphs">
-                      {settings.topText}
-                    </textPath>
-                  </text>
-                </svg>
-                <div className="podcast-style-script">{settings.scriptText}</div>
+                {showTopText && (
+                  <svg className="podcast-style-arc-svg" viewBox="-64 -46 488 158" role="img" aria-label="Górny tytuł covera">
+                    <path id="podcast-style-arc-path" d={`M ${arcStartX} 82 Q 180 ${arcControlY} ${arcEndX} 82`} fill="none" />
+                    <text className="podcast-style-arc-text" textAnchor="middle">
+                      <textPath href="#podcast-style-arc-path" startOffset="50%" textLength={settings.arcWidth} lengthAdjust="spacingAndGlyphs">
+                        {settings.topText}
+                      </textPath>
+                    </text>
+                  </svg>
+                )}
+                {showScriptText && (
+                  <div className="podcast-style-script">{settings.scriptText}</div>
+                )}
                 <div ref={mainTitleRef} className="podcast-style-main-title" style={{ fontSize: fittedTitleSize }}>
                   {titleWords.map((word, index) => (
                     <span key={`${word}-${index}`} className="podcast-style-title-line">
