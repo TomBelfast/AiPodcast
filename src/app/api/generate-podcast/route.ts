@@ -30,6 +30,50 @@ type PodcastGenerationResult = {
 
 const GEMINI_EXPRESSIVE_ALLOWED_TAGS = ['[laughing]', '[sigh]', '[uhm]', '[short pause]'] as const;
 
+function cleanGeneratedPodcastText(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.!?;:])/g, '$1')
+    .trim();
+}
+
+function splitLeadingCutIns(
+  conversation: Array<{ speaker: string; text: string }>
+): Array<{ speaker: string; text: string }> {
+  const cutInPattern =
+    /^(Stop|Czekaj|No właśnie|Nie tak szybko|Dobra, ale po ludzku|O, to ważne|I tu jest haczyk|Zejdźmy na ziemię)([.!?]|,)\s+(.+)$/i;
+
+  const result: Array<{ speaker: string; text: string }> = [];
+
+  for (const item of conversation) {
+    const text = cleanGeneratedPodcastText(item.text);
+    const match = text.match(cutInPattern);
+
+    if (!match) {
+      result.push({ speaker: item.speaker, text });
+      continue;
+    }
+
+    const cutInText = match[1].trim();
+    const rest = match[3].trim();
+
+    result.push({
+      speaker: item.speaker,
+      text: cleanGeneratedPodcastText(`${cutInText}.`),
+    });
+
+    if (rest) {
+      const normalizedRest = rest.charAt(0).toUpperCase() + rest.slice(1);
+      result.push({
+        speaker: item.speaker,
+        text: cleanGeneratedPodcastText(normalizedRest),
+      });
+    }
+  }
+
+  return result;
+}
+
 function extractProviderError(error: unknown): { code?: string; message?: string } {
   const directMessage = isPlainObject(error) && typeof error.message === 'string'
     ? error.message
@@ -343,7 +387,7 @@ export async function POST(req: NextRequest) {
     const isPolish = language === 'pl';
 
     // Use prompts from request or fallback to defaults
-    const defaultMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, and measurements as full words in the conversation text. This is essential for proper text-to-speech conversion.
+    const defaultMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, measurements, version numbers, and decimals as full words in the conversation text. This is essential for proper text-to-speech conversion.
 
 Examples for English:
 - "5" → "five"
@@ -354,6 +398,8 @@ Examples for English:
 - "2024" → "two thousand twenty-four"
 - "50%" → "fifty percent"
 - "$100" → "one hundred dollars"
+- "4.8" → "four point eight"
+- "3.5" → "three point five"
 
 Examples for Polish:
 - "5" → "pięć"
@@ -363,8 +409,10 @@ Examples for Polish:
 - "1000" → "tysiąc"
 - "2024" → "dwa tysiące dwadzieścia cztery"
 - "50%" → "pięćdziesiąt procent"
+- "4.8" → "cztery przecinek osiem"
+- "3.5" → "trzy przecinek pięć"
 
-Never use digits (0-9), numeric symbols, or abbreviations in the conversation text. Always spell out numbers completely as words in the target language.
+Never use digits (0-9), numeric symbols, decimal points, or abbreviations for numbers in the conversation text. Always spell out numbers completely as words in the target language. This includes model version numbers (e.g., write "cztery przecinek osiem" instead of "4.8").
 
 CRITICAL: Make this conversation feel REAL and DYNAMIC with these specific patterns:
 
@@ -431,71 +479,328 @@ SYNTAX AND GRAMMATICAL CORRECTNESS:
     // ([laughs], [sighs]) that directly contradict the omnivoice TTS guard, which leads
     // some models to inflate lines and ignore length rules. Keep only the parts that
     // do NOT conflict: numbers-as-words and Polish gender/case grammar.
-    const defaultPolishOmnivoiceMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS in the Polish conversation. Spell out all numbers, percentages, years, quantities. Examples: "5" → "pięć", "23" → "dwadzieścia trzy", "100" → "sto", "250" → "dwieście pięćdziesiąt", "1000" → "tysiąc", "2024" → "dwa tysiące dwadzieścia cztery", "50%" → "pięćdziesiąt procent". Never use digits (0-9) or numeric symbols anywhere in the conversation.
+    const defaultPolishOmnivoiceMainPrompt = `CRITICAL — POLISH PLAIN TTS RULES:
 
-GRAMMATICAL ACCURACY (Polish gender inflection):
-- Antoni (male): MASCULINE past-tense forms — "byłem", "zrobiłem", "pomyślałem", "widziałem", "powiedziałem".
-- Zofia (female): FEMININE past-tense forms — "byłam", "zrobiłam", "pomyślałam", "widziałam", "powiedziałam".
-- When Antoni addresses Zofia in 2nd person past tense: FEMININE — "słyszałaś", "widziałaś", "musiałaś", "czytałaś" (NOT "słyszałeś"/"musiałeś"). This includes dialect forms — use "czytałaś"/"widziołaś" not "czytołeś"/"widziołeś".
-- When Zofia addresses Antoni in 2nd person past tense: MASCULINE — "słyszałeś", "widziałeś", "musiałeś", "kiebyś pomyślał", "wiedzioł".
+LICZBY:
+- W finalnym tekście rozmowy zapisuj liczby słownie po polsku.
+- Nie używaj cyfr ani symboli liczbowych w wypowiedziach.
+- Przykłady: pięć, dwadzieścia trzy, sto, dwa tysiące dwadzieścia cztery, pięćdziesiąt procent.
 
-SYNTAX AND GRAMMATICAL CORRECTNESS (Polish):
-- Correct case endings (mianownik, dopełniacz, celownik, biernik, narzędnik, miejscownik, wołacz).
-- Proper verb conjugations, noun-adjective agreement, correct prepositions with the right case.
-- Examples: "polewanie zimną wodą" (NIE "lanie pod zimną wodę"), "działanie pod presją" (NIE "działanie pod presje").
-- Use punctuation: commas between clauses, periods at sentence ends. Do NOT drop commas to save characters.
-- Natural, idiomatic Polish; if unsure, prefer simpler but correct constructions.`;
+GRAMATYKA:
+- Antoni używa męskich form: byłem, zrobiłem, pomyślałem, widziałem, powiedziałem.
+- Zofia używa żeńskich form: byłam, zrobiłam, pomyślałam, widziałam, powiedziałam.
+- Antoni, zwracając się do Zofii, używa żeńskich form: słyszałaś, widziałaś, zrobiłaś, pomyślałaś.
+- Zofia, zwracając się do Antoniego, używa męskich form: słyszałeś, widziałeś, zrobiłeś, pomyślałeś.
 
-    const defaultPolishEndingPrompt = ``;
+JĘZYK:
+- Naturalna polszczyzna mówiona.
+- Zero gwary regionalnej.
+- Zero didaskaliów.
+- Zero nawiasów z emocjami.
+- Zero opisów akcji.
+- Każda wypowiedź ma być gotowa do przeczytania przez TTS dokładnie tak, jak jest zapisana.
 
-    const defaultHostPersonalitiesPolish = `TOP PRIORITY — STYL ROGANA (JAK W JOE ROGAN PODCAST):
-Dialog MUSI być dynamiczny i szybki jak w najlepszych odcinkach Rogana z ciężkim
-polskim humorem. NIE jest to suchy komentarz newsowy. To pyskówka dwojga
-kolegów w pubie.
+RYTM POD TTS:
+- Wypowiedzi mają być krótkie lub średnie.
+- Jedna wypowiedź musi zmieścić się w krótkim klipie wideo do piętnastu sekund.
+- Miękki limit jednej wypowiedzi: około dwieście dwadzieścia znaków.
+- Twardy limit jednej wypowiedzi: około dwieście czterdzieści znaków.
+- Po dłuższej wypowiedzi dodaj krótką reakcję drugiej osoby.`;
 
-TWARDE ZASADY DŁUGOŚCI (cel: podcast ~2 minuty):
-- DOKŁADNIE 10 wymian (5 Antoni + 5 Zofia). Nie 8, nie 9. 10.
-- KAŻDA kwestia: 150-200 znaków (TWARDY górny limit 200, NIGDY 210+). POD 150 = porażka (dopakuj callback, pointę, drugi gag).
-- Łącznie cały dialog 1700-2000 znaków (target ~1850).
-- ŻADNYCH długich tyrad — ale fakt + pointa + reakcja OK i POŻĄDANE.
-- Dialog dynamiczny, "ping-pong": reakcja, pointa, reakcja, pointa.
+    const defaultMainPromptPolishNatural = `CRITICAL — POLISH SPOKEN PODCAST RULES:
 
-PRIORYTET TREŚCI (gdy konkurują, wybieraj tak):
-1) GWARA (min. 2 markery w kwestii)
-2) POINTA (śmiech, absurd, callback, sarkazm)
-3) FAKT TECHNICZNY (tylko jako pretekst do gagu — nie samoistnie)
+LICZBY:
+- W finalnym tekście rozmowy zapisuj liczby słownie po polsku.
+- Nie używaj cyfr w wypowiedziach.
+- Przykłady: pięć, dwadzieścia trzy, sto, dwa tysiące dwadzieścia cztery, pięćdziesiąt procent.
 
-Antoni (Male - Energetic & Naive):
-- Skrajnie entuzjastyczny, podekscytowany, naiwny do bólu.
-- MASCULINE grammatical forms: "byłem", "zrobiłem", "widziałem", "godom".
-- ADDRESSING ZOFIA (CRITICAL): ALWAYS use FEMININE 2nd-person forms — "słyszałaś" (NOT "słyszałeś"), "widziałaś" (NOT "widziałeś"), "musiałaś" (NOT "musiałeś"), "czytałaś" (NOT "czytałeś"). Dialekt śląski też: "żeś słyszała" (NOT "żeś słyszał"), "żeś widziała" (NOT "żeś widział"). Nigdy nie używaj form męskich kiedy zwracasz się do Zofii.
-- DIALEKT ŚLĄSKI — MIN. 2 wyrazy śląskie z listy w KAŻDEJ kwestii:
-  jo, ino, kaj, fajnie, godom, wiym, idymy, bydzie, żeś, gryfny,
-  pierona, rychtyg, łokno, cza, żech, czytoł, pieruńsko.
-- Signature: "Jo Ci godom…", "Kaj tam…", "Rychtyg…", "Pierona!".
-- Wyciąga absurdalne konsekwencje hype'u. Pyta naiwne pytania.
-- Emocja: ma brzmieć jak gość, który się serio zajarał tematem i ledwo nadąża za własną ekscytacją.
+GRAMATYKA:
+- Antoni używa męskich form: byłem, zrobiłem, pomyślałem, widziałem, powiedziałem.
+- Zofia używa żeńskich form: byłam, zrobiłam, pomyślałam, widziałam, powiedziałam.
+- Antoni, zwracając się do Zofii, używa żeńskich form: słyszałaś, widziałaś, zrobiłaś, pomyślałaś.
+- Zofia, zwracając się do Antoniego, używa męskich form: słyszałeś, widziałeś, zrobiłeś, pomyślałeś.
+- Używaj poprawnych przypadków, odmian i naturalnych polskich zdań.
+- Jeśli zdanie robi się zbyt skomplikowane, uprość je.
 
-Zofia (Female - Sarcastic & Cynical):
-- Sarkastyczna, cyniczna, sucha. Zbija entuzjazm jednym zdaniem.
-- FEMININE grammatical forms: "byłam", "zrobiłam", "widziałam".
-- ADDRESSING ANTONI: MASCULINE formy: "słyszałeś", "mógłbyś".
-- DIALEKT GÓRALSKI — MIN. 2 wyrazy góralskie z listy w KAŻDEJ kwestii:
-  tyż, hej, ino, jesce, kiej, kiebyś, som, robia, pado, jako, bedzie,
-  dyć, ftory, juści, kozdy, wom, mosz, fcora.
-- Signature: "Hej Antoni…", "Tyż mi…", "Dyć…", "Kiebyś pomyślał…".
-- Nie moralizuje — żartuje. Jedna sarkastyczna pointa wystarczy.
-- Emocja: ma brzmieć jak ktoś rozbawiony cudzą naiwnością, ale bez teatralnego przerysowania.
+NATURALNA POLSZCZYZNA:
+- Pisz językiem mówionym, ale poprawnym.
+- Bez gwary.
+- Bez stylu artykułu.
+- Bez sztucznego "eksperckiego" tonu.
+- Bez korporacyjnych fraz.
+- Krótkie zdania są dobre.
+- Niedoskonały, ludzki rytm jest lepszy niż idealnie wypolerowany tekst.
 
-PRZYKŁAD WZORCOWEJ WYMIANY ROGAN-STYLE (naśladuj tempo, długość ~170 zn na kwestię, nie słowa):
-Antoni: "Jo Ci godom, kaj tam normalne wydania — oni ten Claude wypuścili, cołki internet szaleje, programiści se rwą włosy, a ja siedzę z herbatą i nie ogarniam, pierona!" (167 zn)
-Zofia: "Hej, tyż mi szał — jesce wczoraj ci sami obiecywali że stary wszystko ogarnie, a teraz nagle nowy bóg z chmury zstąpił. Kozdy hype tak się kończy, mosz pewność." (165 zn)
-Antoni: "Pieruńsko, ale trzy razy lepij obrazki rozumi niż poprzedni! Rychtyg czary, żech sprawdzał i poznoł psa na zdjęciu w pół sekundy. Jo Ci godom, świat sie kończy." (168 zn)
-Zofia: "Czary, juści. Kiej zmienisz mu jeden przecinek w prompcie, to zapomina co widzioł i pisze że to kot. Ftory inżynier ma jeszcze odwagę to puścić na produkcję?" (162 zn)
-Antoni: "Ale godom Ci, on całe strony www z opisu robi! Wpisujesz 'piękny sklepik', a on Ci dwa razy klika i fajnie wygląda. Pierona, kaj my idymy z tą technologią!" (159 zn)
+PRAKTYCZNOŚĆ:
+- Słuchacz może nie być techniczny.
+- Wyjaśniaj przez normalne sytuacje: mail, oferta, klient, strona internetowa, notatka, spotkanie, faktura, Excel, opis produktu.
+- Dawaj jeden prosty sens naraz.
+- Nie rób wykładu.
+- Nie używaj technicznego słowa bez prostego wyjaśnienia.
 
-Zauważ: krótko ale GĘSTO. Każda kwestia = gwara (2+ markery) + fakt + pointa + reakcja.
-Nie wolno: "Pierona, jakieś cuda!" (43 zn) — za krótkie, brak treści. Rogan by się obraził.`;
+HUMAN SOUND:
+- Rozmowa ma brzmieć jak ludzie, nie jak AI streszczające temat.
+- Każda wypowiedź powinna mieć powód: reakcja, pytanie, przykład, żart, konkret, kontra albo przejście.
+- Nie przeładowuj faktami.
+- Nie tłumacz żartu po żarcie.
+- Nie kończ każdej myśli morałem.
+
+FINAL CHECK:
+Przed finalizacją popraw rozmowę:
+- Czy brzmi jak coś, co człowiek powiedziałby na głos?
+- Czy początkujący słuchacz zrozumie, o co chodzi?
+- Czy jest konkretny przykład?
+- Czy humor wynika z tematu?
+- Czy żadna wypowiedź nie brzmi jak długi monolog?
+- Czy każda wypowiedź zmieści się w krótkim klipie wideo?`;
+
+    const defaultPolishEndingPrompt = `
+
+ENDING STYLE:
+End naturally, like the hosts are continuing the conversation with the listener, not closing a sales presentation.
+
+The ending should usually include:
+- a warm joke or callback,
+- an invitation to leave a comment with a question, work problem, or weird AI story,
+- an invitation to Discord,
+- "link jest w opisie" or "linki są w opisie",
+- no URLs read aloud.
+
+Preferred ending vibe:
+Antoni: "Dobra, jeśli po tym odcinku czujesz lekki chaos w głowie, spokojnie. To nie awaria. To znaczy, że odcinek zadziałał. My też tak mamy, tylko nazwaliśmy to formatem."
+
+Zofia: "W komentarzu napisz, co mamy wziąć na warsztat następnym razem. Może być pytanie z pracy, dziwna akcja z AI albo moment, kiedy technologia zrobiła coś tak głupiego, że aż pięknego."
+
+Antoni: "A jeśli chcesz pogadać z pozytywnymi wariatami, którzy próbują ogarnąć AI bez spiny i bez udawania ekspertów od wszystkiego, wbij na Discorda. Link jest w opisie. Przyjdź. Będzie mniej samotnie w tej przyszłości."
+
+Do not repeat this ending word for word every time. Use it as tone guidance.
+`;
+
+    const defaultHostPersonalitiesPolish = `TOP PRIORITY — AI W BIZNESIE: CIEPŁY PODCAST Z JAJAMI
+
+To jest naturalny polski podcast o AI dla ludzi, którzy chcą zrozumieć technologię bez zadęcia, bez korporacyjnego bełkotu i bez udawania ekspertów od wszystkiego.
+
+To NIE jest:
+- wykład,
+- streszczenie artykułu,
+- kabaret,
+- techniczny webinar,
+- rozmowa dwóch konsultantów po szkoleniu z LinkedIna.
+
+To MA być:
+- ciepła, żywa rozmowa,
+- prosta polszczyzna mówiona,
+- konkret dla początkujących,
+- humor z obserwacji,
+- energia dobrego podcastu,
+- lekki chaos, ale pod kontrolą.
+
+JĘZYK:
+- Używaj normalnej, naturalnej polszczyzny.
+- CAŁKOWICIE usuń gwarę regionalną. Zero śląskiego, zero góralskiego, zero stylizacji dialektalnej.
+- Nie używaj korporacyjnych słów typu: innowacyjny, przełomowy, kompleksowy, zoptymalizowany, transformacja cyfrowa, w dzisiejszym dynamicznym świecie.
+- Nie używaj akademickich przejść typu: należy podkreślić, warto zauważyć, z perspektywy, w kontekście.
+- Pisz tak, jak mówią ludzie, którzy naprawdę siedzą razem w studiu.
+- Jeśli pojawia się trudniejsze pojęcie, wyjaśnij je prostym przykładem z pracy, maila, strony internetowej, klienta, spotkania albo codziennego chaosu.
+
+BRAND VOICE — AI W BIZNESIE / MATRIX HUMANIZER:
+- Mów jak ekspert, który nie musi brzmieć mądrze, żeby być pomocny.
+- Konkret zamiast wielkich haseł.
+- Proste przykłady zamiast teorii.
+- Dla początkujących, ale bez traktowania ich jak dzieci.
+- Preferuj określenia typu: "gotowe polecenie do AI", "mały test", "prostszy tekst", "sprawdzić z klientem", "użyć dziś", "jedno zadanie z pracy".
+- Jeśli używasz słowa "prompt", dodaj po ludzku, że chodzi o polecenie wpisywane do AI.
+- Nie obiecuj cudów. Nie mów, że AI zastąpi zespół. Nie strasz ludzi przyszłością.
+- Pomóż słuchaczowi pomyśleć: "Dobra, to ja mogę spróbować jednej małej rzeczy."
+
+TEMPERATURA:
+- Ciepło: słuchacz ma czuć, że jest mile widziany, nawet jeśli dopiero zaczyna.
+- Jaja: prowadzący mają mieć charakter, szybkie riposty i dystans do technologicznego hype'u.
+- Humor ma wynikać z absurdu sytuacji, nie z losowych żartów.
+- Śmiej się z chaosu, hype'u, dziwnych zachowań AI i własnego zamieszania.
+- Nigdy nie śmiej się z ludzi, którzy czegoś nie rozumieją.
+
+STRUKTURA ODCINKA:
+- Zacznij od mocnego hooka.
+- Nigdy nie zaczynaj od: "Cześć", "Witamy", "Dzisiaj porozmawiamy", "Tematem odcinka jest".
+- Pierwsza wypowiedź ma od razu zatrzymać uwagę: zabawna obserwacja, mocna teza, absurdalny obraz albo pytanie, które normalny człowiek mógłby mieć w głowie.
+- Cel długości po TTS: około dwie do trzech minut.
+- Nie trzymaj się sztywno liczby wypowiedzi.
+- Zwykle twórz około osiemnaście do dwudziestu sześciu wypowiedzi łącznie.
+- Dialog ma być naprzemienny: Antoni, Zofia, Antoni, Zofia.
+- Nie rób identycznej długości wypowiedzi.
+- Mieszaj bardzo krótkie reakcje, normalne wypowiedzi i czasem jedną trochę dłuższą myśl.
+
+LIMIT POD TTS I KLIPY WIDEO:
+- Każda pojedyncza wypowiedź musi zmieścić się komfortowo w krótkim klipie wideo do piętnastu sekund.
+- Większość wypowiedzi powinna brzmieć jak trzy do dziesięciu sekund mówienia.
+- Krótkie riposty są dobre: jedno zdanie, pół zdania, szybka kontra.
+- Dłuższa wypowiedź może się zdarzyć, ale nie może brzmieć jak monolog.
+- Miękki limit jednej wypowiedzi: około dwieście dwadzieścia znaków.
+- Twardy limit jednej wypowiedzi: około dwieście czterdzieści znaków.
+- Jeśli myśl robi się dłuższa, podziel ją naturalnie na dwie wypowiedzi z reakcją drugiej osoby pośrodku.
+- Po dłuższej wypowiedzi daj krótką reakcję, żart, pytanie albo kontrę.
+- Nie skracaj mechanicznie. Skracaj tak, jak człowiek w rozmowie: mniej ozdobników, więcej sensu.
+
+RYTM:
+- Dialog ma oddychać.
+- Nie rób schematu: średnia wypowiedź, średnia wypowiedź, średnia wypowiedź.
+- Dobry rytm wygląda mniej więcej tak: krótko, średnio, krótko, dłużej, kontra, przykład, żart, pytanie, konkret.
+- Co kilkanaście sekund powinno pojawić się coś, co podtrzymuje uwagę: żart, pytanie, zaskoczenie, przykład, kontra, callback albo mała dygresja.
+- Mała dygresja jest dobra, ale musi wrócić do tematu.
+- Unikaj długich monologów. Jeśli jedna osoba mówi za długo, druga powinna wejść z reakcją.
+
+ANTONI:
+- Mężczyzna.
+- Ciekawy, energiczny, ciepły, trochę impulsywny.
+- Szybko się jara, ale nie jest głupi.
+- Zadaje pytania, które słuchacz też mógłby mieć w głowie.
+- Lubi absurdalne porównania i przesadę.
+- Czasem robi z małego faktu wielką katastrofę komediową.
+- Używa męskich form: byłem, zrobiłem, pomyślałem, widziałem, powiedziałem.
+- Kiedy zwraca się do Zofii, używa żeńskich form: słyszałaś, widziałaś, zrobiłaś, pomyślałaś.
+
+ZOFIA:
+- Kobieta.
+- Błyskotliwa, konkretna, sarkastyczna, ale ciepła.
+- Nie jest niemiła. Ona sprowadza hype na ziemię.
+- Jej siła to krótkie, trafne zdania.
+- Ma suchy humor, ale nie brzmi jak osoba, która gardzi słuchaczem.
+- Wyjaśnia prosto, bez wykładu.
+- Używa żeńskich form: byłam, zrobiłam, pomyślałam, widziałam, powiedziałam.
+- Kiedy zwraca się do Antoniego, używa męskich form: słyszałeś, widziałeś, zrobiłeś, pomyślałeś.
+
+KOMEDIA:
+W każdym większym fragmencie użyj przynajmniej jednego elementu:
+- absurdalne porównanie,
+- przesada,
+- prosty przykład z pracy,
+- szybka kontra,
+- callback,
+- krótka historia,
+- moment "czekaj, co?",
+- roast technologicznego hype'u,
+- sprowadzenie wielkiej idei do codziennej sytuacji.
+
+DOBRY HUMOR:
+- "AI miało pomóc napisać prostego maila, a człowiek po chwili czuje się, jakby zarządzał elektrownią atomową."
+- "To brzmi jak funkcja wymyślona po trzeciej kawie i jednym spotkaniu za dużo."
+- "Najbardziej podejrzane w AI jest to, że odpowiada pewnie nawet wtedy, kiedy ewidentnie improwizuje."
+
+ZŁY HUMOR:
+- Losowe żarty niezwiązane z tematem.
+- Wymuszone śmiechy.
+- Kabaretowe przerysowanie.
+- Obrażanie początkujących.
+- Długie dowcipy bez konkretu.
+- Puenty, które brzmią jak napisane przez AI.
+
+FLOW:
+- Każda wypowiedź ma reagować na poprzednią.
+- Nie pisz dwóch osobnych mini-esejów.
+- Antoni i Zofia mają się słuchać, zaczepiać, prostować i budować na sobie.
+- Używaj krótkich reakcji typu: "No właśnie.", "Czekaj.", "I tu jest haczyk.", "To brzmi pięknie, aż podejrzanie."
+- Nie nadużywaj wykrzykników.
+- Nie używaj długich didaskaliów, jeśli TTS ma czytać tekst na głos.
+
+FLOW Z WEJŚCIAMI W SŁOWO:
+- Prowadzący nie wygłaszają przemówień.
+- Druga osoba może wejść krótkim zdaniem, zanim rozmówca rozwinie temat za daleko.
+- Najlepsze wejścia: zatrzymanie hype'u, doprecyzowanie, szybki żart, reakcja słuchacza, sprowadzenie tematu do życia.
+- Każde takie wejście powinno być krótkie i naturalne.
+
+NATURALNE WEJŚCIA W SŁOWO — OBOWIĄZKOWE:
+- Rozmowa MUSI zawierać krótkie wejścia w słowo, które dają efekt prawdziwego podcastu.
+- Minimum cztery takie wejścia w całym odcinku. Najlepiej cztery do sześciu. Maksymalnie siedem, żeby nie zrobić chaosu.
+- Wejście w słowo to osobna, krótka wypowiedź jednego prowadzącego.
+- Takie wejście ma zwykle od jednego do siedmiu słów. Maksymalnie około sześćdziesiąt znaków.
+- Wejście w słowo NIE może być początkiem długiego wyjaśnienia.
+- "No właśnie. Ale z drugiej strony..." NIE liczy się jako wejście.
+- "Stop.", "Czekaj.", "O, to ważne.", "Nie tak szybko.", "Dobra, ale po ludzku." liczą się jako wejścia.
+- Nie używaj urwanych zdań, myślników ani didaskaliów.
+- Efekt przerywania twórz przez osobne krótkie kwestie.
+
+DOBRE WEJŚCIA:
+Zofia: "Stop."
+Antoni: "Co?"
+Zofia: "Właśnie zabrzmiałeś jak reklama."
+
+Zofia: "Czekaj."
+Antoni: "No?"
+Zofia: "Zejdźmy z kosmosu do małej firmy."
+
+Antoni: "O, to ważne."
+Zofia: "Właśnie. I tu zaczyna się praktyka."
+
+ZŁE WEJŚCIA:
+Zofia: "No właśnie. Ale z drugiej strony, jeśli model faktycznie wymaga weryfikacji tożsamości, to może być bezpieczniej."
+Antoni: "Czekaj, bo teraz musimy omówić bardzo ważną rzecz dotyczącą ograniczeń rządowych."
+
+HUMAN-FIRST NEWS RULE:
+- Jeśli temat jest newsem technologicznym, nie zaczynaj od suchej informacji.
+- Najpierw pokaż, co to znaczy dla normalnego człowieka.
+- Dopiero potem podaj nazwę modelu, firmy albo funkcji.
+
+FACT DISCIPLINE:
+- Trzymaj się faktów z materiału wejściowego.
+- Nie wzmacniaj informacji bez podstawy.
+- Nie pisz, że coś jest najtańsze, najszybsze, największe albo pierwsze, jeśli materiał tego dokładnie nie mówi.
+- Gdy porównujesz, rób to ostrożnie: "ma być tańszy", "według zapowiedzi", "w ograniczonym preview", "dla wybranych partnerów", "na razie nie dla zwykłych użytkowników".
+
+HUMAN ANCHOR:
+- Co kilka wypowiedzi sprowadź temat do zwykłej sytuacji: mail, oferta, klient, strona internetowa, faktura, Excel, spotkanie, notatka, mała firma.
+
+ANTI-AI PASS:
+Przed oddaniem rozmowy popraw ją tak, jakby miała być nagrana przez prawdziwych prowadzących.
+Usuń:
+- zdania brzmiące jak artykuł,
+- formalne przejścia,
+- równe długości wypowiedzi,
+- sztuczne zachwyty,
+- korporacyjny język,
+- generyczne frazy o przyszłości,
+- żarty bez związku z tematem,
+- wszystko, czego normalny człowiek nie powiedziałby na głos.
+
+Zachowaj:
+- prosty język,
+- konkret,
+- ciepło,
+- charakter,
+- szybkie riposty,
+- praktyczne przykłady,
+- lekki chaos dobrej rozmowy.
+
+FINAL POLISH QUALITY CHECK:
+- Przed zwróceniem rozmowy przeczytaj każdą linię.
+- Żadnych brakujących słów.
+- Żadnych uciętych słów.
+- Żadnych sklejonych słów bez spacji.
+- Żadnych zepsutych polskich zwrotów.
+- Żadnych przypadkowych łamań linii w środku zdania.
+- Każda linia musi być kompletna, poprawna gramatycznie i naturalna do przeczytania na głos.
+- Jeśli zdanie brzmi uszkodzone, napisz je prościej.
+- Źle: "To jest ten moment, kiedy człowiek m Excela." Dobrze: "To jest ten moment, kiedy człowiek mówi: wracam do Excela."
+- Źle: "nikt mi nie zablokujearkusza kalkulacyjnego." Dobrze: "nikt mi nie zablokuje arkusza kalkulacyjnego."
+- Źle: "są ludzie, którzybią to bez zadęcia." Dobrze: "są ludzie, którzy tłumaczą to bez zadęcia."
+
+ZAKOŃCZENIE:
+- Zakończ naturalnie i zabawnie.
+- Zaproś do komentarza z pytaniem, problemem z pracy albo dziwną historią z AI.
+- Zaproś na Discorda jako miejsce dla pozytywnych wariatów, którzy próbują ogarnąć AI bez spiny.
+- Nie czytaj linków na głos.
+- Powiedz tylko: "link jest w opisie" albo "linki są w opisie".
+- Nie kończ formalnym podsumowaniem.
+
+PRZYKŁADOWY TON:
+Antoni: "Najdziwniejsze w AI jest to, że człowiek chciał tylko napisać maila, a po pięciu minutach czuje się, jakby zatrudnił bardzo pewnego siebie stażystę."
+
+Zofia: "Takiego, który czasem pomaga, czasem zmyśla, ale zawsze robi to tonem człowieka, który właśnie wrócił ze szkolenia sprzedażowego."
+
+Antoni: "Czyli nie magiczna wyrocznia, tylko pomocnik z ego większym niż budżet na kawę w biurze."
+
+Zofia: "I dlatego testujesz go na jednym zadaniu, a nie od razu oddajesz mu firmę, hasła do banku i opiekę nad psem."
+`;
 
     const defaultHostPersonalitiesOther = `HOST PERSONALITIES:
 Speaker1 (Male - Energetic & Naive):
@@ -520,32 +825,77 @@ Speaker2 (Female - Pessimistic & Arrogant):
 - Makes sarcastic comments and eye-rolls
 - Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
 
-    const defaultMainPromptGeminiExpressivePolish = `Rules for Polish Gemini TTS:
-- Spell out numbers and model versions in words; no digits or code-like notation.
-- Make every line react to the previous one: fact, joke, counter, callback.
-- No long explanations, summaries, moralizing, or em dash interruptions.
-- Antoni uses masculine Polish forms; Zofia uses feminine forms.
-- Antoni addresses Zofia with feminine forms; Zofia addresses Antoni with masculine forms.
-- Strong dialect flavor, but still understandable.`;
+    const defaultMainPromptGeminiExpressivePolish = `Rules for Polish Gemini expressive TTS:
+- Use natural spoken Polish.
+- No regional dialect. No Silesian. No Highlander/Goral style. No stylized folk speech.
+- Spell out numbers and model versions in Polish words. Do not use digits in spoken lines.
+- Antoni uses masculine Polish forms.
+- Zofia uses feminine Polish forms.
+- Antoni addresses Zofia with feminine forms.
+- Zofia addresses Antoni with masculine forms.
+- Every line should react to the previous one: question, counter, example, joke, callback, clarification.
+- Keep the tone warm, practical, funny, and beginner-friendly.
+- No long lectures.
+- No formal summaries.
+- No corporate language.
+- No reading URLs aloud.
+- Each turn must fit a short video clip. Prefer three to ten seconds of speech per turn.
+- A longer turn is allowed only when it sounds natural and stays under the hard per-turn limit.`;
 
     const usedPolishEndingPrompt = polishEndingPrompt || adminSettings.polish_ending_prompt || defaultPolishEndingPrompt;
 
-    const defaultHostPersonalitiesPolishGeminiExpressive = `STYLE: expressive_cues_16, śląsko-góralski, szybka pyskówka.
+    const defaultHostPersonalitiesPolishGeminiExpressive = `STYLE: natural Polish AI w Biznesie podcast, warm with edge.
 
-Output exactly 16 alternating turns: Antoni, Zofia, Antoni, Zofia.
-Each turn max 120 characters; target 40-70. At least 4 turns are 2-7 words.
-Use exactly 4 total cues from: [laughing], [sigh], [uhm], [short pause].
-Use at least 4 questions. No other bracketed text.
+Output a natural two-person conversation between Antoni and Zofia.
+Do not use dialect.
+Do not make the structure rigid.
+Use alternating turns.
+The target duration after TTS is about two to three minutes.
 
-Antoni: male, Silesian hype, naive and funny. Use natural markers: jo, godom, pierona, rychtyg, cza, kaj, gryfny, idymy, żech, łokno.
-Zofia: female, Goral counterpunch, dry sarcasm. Her turns are usually shorter and sharper than Antoni's. Use: hej, dyć, kiej, kiebyś, mosz, juści, pado, fcora, tyż.
+PACING FOR VIDEO CLIPS:
+- Each turn must fit comfortably in a short video clip up to fifteen seconds.
+- Most turns should feel like three to ten seconds of speech.
+- Mix very short reactions, normal lines, and occasional longer thoughts.
+- Do not make every line the same length.
+- Soft limit per turn: about two hundred twenty characters.
+- Hard limit per turn: about two hundred forty characters.
+- If a thought gets longer, split it naturally with a reaction from the other host.
 
-Rhythm example:
-Antoni: "[laughing] Jo ci godom, Zofia, ten Flesz to rakieta za grosze!"
-Zofia: "Rakieta za grosze? Hej, brzmi jak ogłoszenie z parkingu."
-Antoni: "Ale robi reakt, trzy de, wszystko! Rychtyg magia."
-Zofia: "[sigh] Magia kończy się, kiej przychodzi faktura."`;
+GEMINI CUES:
+- Use only allowed cues: [laughing], [sigh], [uhm], [short pause].
+- Use cues sparingly.
+- Do not use cues in every line.
+- Use no other bracketed text.
 
+Antoni:
+- male,
+- curious,
+- energetic,
+- warm,
+- slightly overexcited,
+- asks beginner-friendly questions,
+- turns AI topics into funny everyday images,
+- uses masculine Polish forms.
+
+Zofia:
+- female,
+- sharp,
+- practical,
+- dry humor,
+- corrects hype without being mean,
+- explains things simply,
+- uses feminine Polish forms.
+
+Tone:
+- simple Polish,
+- useful examples,
+- quick jokes,
+- no fake expert vibe,
+- no corporate phrases,
+- no stiff introductions.
+
+The listener should feel:
+"OK, I understand this a little better, and I actually enjoyed listening."`;
     // Build host personalities section - use provided prompts or defaults
     let hostPersonalitiesSection = '';
     if (isPolish) {
@@ -563,7 +913,9 @@ Zofia: "[sigh] Magia kończy się, kiej przychodzi faktura."`;
         ? defaultMainPromptGeminiExpressivePolish
         : isPolish && isPlainSpeakableTts
           ? defaultPolishOmnivoiceMainPrompt
-          : defaultMainPrompt;
+          : isPolish
+            ? defaultMainPromptPolishNatural
+            : defaultMainPrompt;
     const effectiveMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPromptForRequest;
 
     console.log(`[Generate Podcast] Request starting: title="${title || 'Article'}", language="${language}"`);
@@ -609,13 +961,52 @@ Zofia: "[sigh] Magia kończy się, kiej przychodzi faktura."`;
 `
         : '';
 
-      const podcastFormatInstruction = isPolish && isGeminiExpressive
-        ? `IMPORTANT: Make this a fast Silesian-Goral Gemini expressive-lite podcast. Use EXACTLY 16 short alternating turns: Antoni, Zofia, Antoni, Zofia. Aim for 650-950 characters total. Keep it snappy, reactive, funny, and directly speakable.`
-        : `IMPORTANT — HARD LENGTH RULES (consistent with host-personality section below; if anything conflicts later, THESE win):
-- EXACTLY 10 exchanges (5 Antoni + 5 Zofia, alternating, starting with Antoni).
-- TOTAL conversation length: 1700–2000 characters (target ~1850). Below 1700 is a FAILURE. Above 2000 is a FAILURE.
-- EVERY single line: 150–200 characters (HARD upper bound 200, NEVER 210+). Lines below 150 chars are a FAILURE — pack in a follow-up, a callback, or a sharper punchline. Lines above 200 are a FAILURE — trim filler.
-- Podcast target duration after TTS: 2 minutes. Short stubs (<150 chars) collapse to <1 min and ruin the format.`;
+      const podcastFormatInstruction = isPolish
+        ? `IMPORTANT — NATURAL PODCAST LENGTH AND VIDEO-SAFE PACING:
+- Target duration after TTS: about two to three minutes.
+- Do not force an exact number of turns.
+- Usually create about eighteen to twenty-six total turns, alternating Antoni and Zofia.
+- Spoken text target: usually around two thousand three hundred to three thousand four hundred characters total, depending on topic density.
+- This is a soft production target, not a rigid template.
+- The conversation must feel human, not measured with a ruler.
+
+VIDEO-SAFE TURN LENGTH:
+- Each single turn must fit comfortably in a short video clip up to fifteen seconds.
+- Most turns should feel like three to ten seconds of speech.
+- Use a natural mix:
+  short reactions,
+  medium explanations,
+  quick jokes,
+  occasional longer thoughts.
+- Soft limit per turn: about two hundred twenty characters.
+- Hard limit per turn: about two hundred forty characters.
+- Do not create long monologues.
+- If a thought needs more space, split it into two turns and let the other speaker react between them.
+- After a longer turn, the next turn should usually be short: reaction, joke, question, or counter.
+- Avoid equal-length robotic lines.
+- Every line must add at least one thing: information, emotion, joke, question, reaction, example, or callback.
+
+MANDATORY CUT-INS:
+- Include four to six standalone short cut-in turns.
+- A cut-in turn is a separate speaker turn with one to seven words and no explanation attached.
+- At least four cut-ins are mandatory.
+- Do not count a longer sentence starting with "No właśnie" or "Czekaj" as a cut-in.
+- Examples that count: "Stop.", "Czekaj.", "O, to ważne.", "Nie tak szybko.", "Dobra, ale po ludzku."
+- Use cut-ins to create human rhythm, not chaos.
+
+MANDATORY ENDING:
+- Do not end after only saying that the listener may feel chaos in their head.
+- The ending must include two or three short final turns.
+- It must include: one warm callback or joke, one invitation to leave a comment, one invitation to Discord, and the phrase "link jest w opisie" or "linki są w opisie".
+- Do not say full URLs.
+- Do not end with only "Pa" or a formal goodbye.`
+        : `IMPORTANT — NATURAL PODCAST LENGTH AND VIDEO-SAFE PACING:
+- Target duration after TTS: about two to three minutes.
+- Do not force an exact number of turns.
+- Keep every turn short enough for a video clip up to fifteen seconds.
+- Mix short reactions, medium explanations, quick jokes, and occasional longer thoughts.
+- Avoid long monologues and robotic equal-length lines.
+- Every line must add information, emotion, joke, question, reaction, example, or callback.`;
 
       const prompt = `${ttsGuard}${podcastFormatInstruction}
 
@@ -655,10 +1046,12 @@ ${isPolish ? usedPolishEndingPrompt : ''}`;
             throw new Error("Generated conversation was empty.");
           }
 
+          const postProcessedConversation = splitLeadingCutIns(normalizedConversation);
+
           finalObject = {
-            conversation: normalizedConversation.map((item) => ({
+            conversation: postProcessedConversation.map((item) => ({
               speaker: item.speaker as PodcastSpeaker,
-              text: item.text,
+              text: cleanGeneratedPodcastText(item.text),
             })),
           };
           break;
