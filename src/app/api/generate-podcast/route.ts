@@ -36,8 +36,22 @@ const GEMINI_EXPRESSIVE_ALLOWED_TAGS = ['[laughing]', '[sigh]', '[uhm]', '[short
 const FOREIGN_SCRIPT_PATTERN =
   /[Ͱ-ϿЀ-ӿ֐-׿؀-ۿ　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]/g;
 
+// Polish reads decimal model versions as "przecinek", not "punkt"/"kropka".
+// Only rewrite when "punkt"/"kropka" sits between two Polish number words, so
+// normal uses of "punkt" (e.g. "punkt widzenia") are left untouched.
+const POLISH_NUMBER_WORD =
+  'zero|jeden|jedna|dwa|dwie|trzy|cztery|pięć|sześć|siedem|osiem|dziewięć|dziesięć';
+const MODEL_VERSION_SEPARATOR_PATTERN = new RegExp(
+  `((?:${POLISH_NUMBER_WORD})\\s+)(punkt|kropka)(\\s+(?:${POLISH_NUMBER_WORD}))`,
+  'gi'
+);
+
+function normalizePolishModelVersionText(text: string): string {
+  return text.replace(MODEL_VERSION_SEPARATOR_PATTERN, '$1przecinek$3');
+}
+
 function cleanGeneratedPodcastText(text: string): string {
-  return text
+  return normalizePolishModelVersionText(text)
     .replace(FOREIGN_SCRIPT_PATTERN, '')
     .replace(/\s+/g, ' ')
     .replace(/\s+([,.!?;:])/g, '$1')
@@ -581,6 +595,11 @@ Zofia: "W komentarzu napisz, co mamy wziąć na warsztat następnym razem. Może
 Antoni: "A jeśli chcesz pogadać z pozytywnymi wariatami, którzy próbują ogarnąć AI bez spiny i bez udawania ekspertów od wszystkiego, wbij na Discorda. Link jest w opisie. Przyjdź. Będzie mniej samotnie w tej przyszłości."
 
 Do not repeat this ending word for word every time. Use it as tone guidance.
+
+WARM DISCORD FRAMING:
+Good: "pozytywni wariaci, którzy próbują ogarnąć AI bez spiny", "ludzie, którzy testują AI po ludzku", "bez udawania ekspertów od wszystkiego", "będzie mniej samotnie w tej przyszłości".
+Bad: "ludzie, którzy też nie ogarniają", "społeczność profesjonalistów", "eksperci wdrażający AI", "dołącz do naszej społeczności", "kliknij link i subskrybuj".
+The Discord invite must feel warm and with-edge, never helpless and never corporate.
 `;
 
     const defaultHostPersonalitiesPolish = `TOP PRIORITY — AI W BIZNESIE: CIEPŁY PODCAST Z JAJAMI
@@ -748,11 +767,20 @@ HUMAN-FIRST NEWS RULE:
 - Najpierw pokaż, co to znaczy dla normalnego człowieka.
 - Dopiero potem podaj nazwę modelu, firmy albo funkcji.
 
-FACT DISCIPLINE:
+FACT DISCIPLINE — NO UNSUPPORTED SUPERLATIVES:
 - Trzymaj się faktów z materiału wejściowego.
 - Nie wzmacniaj informacji bez podstawy.
-- Nie pisz, że coś jest najtańsze, najszybsze, największe albo pierwsze, jeśli materiał tego dokładnie nie mówi.
-- Gdy porównujesz, rób to ostrożnie: "ma być tańszy", "według zapowiedzi", "w ograniczonym preview", "dla wybranych partnerów", "na razie nie dla zwykłych użytkowników".
+- Nie pisz, że coś jest "najszybsze", "najtańsze", "największe", "najlepsze", "pierwsze" albo "w historii", jeśli materiał wejściowy nie mówi tego dosłownie.
+- Gdy opisujesz nowe modele, używaj ostrożnych sformułowań: "według zapowiedzi", "ma być", "reklamowany jako", "część osób mówi, że".
+- Żart może być przerysowany, ale informacja bazowa ma zostać prawdziwa i ostrożna.
+- Jeśli temat dotyczy regulacji, rządu albo ograniczeń, nie przesadzaj faktów. Nie pisz "zgoda rządu", jeśli materiał mówi tylko o weryfikacji albo ograniczonym dostępie.
+- Nie pisz "to już się dzieje", jeśli materiał tego jasno nie potwierdza.
+
+MODEL VERSION LANGUAGE:
+- W polskim tekście wersje modeli zapisuj po polsku.
+- "GPT 5.6" zapisuj jako "GPT pięć przecinek sześć".
+- Nie używaj "punkt" ani "kropka" do wersji liczbowych w polskim audio. Zawsze "przecinek".
+- Nie używaj cyfr w finalnym spoken text.
 
 HUMAN ANCHOR:
 - Co kilka wypowiedzi sprowadź temat do zwykłej sytuacji: mail, oferta, klient, strona internetowa, faktura, Excel, spotkanie, notatka, mała firma.
@@ -1000,6 +1028,8 @@ MANDATORY CUT-INS:
 - Do not count a longer sentence starting with "No właśnie" or "Czekaj" as a cut-in.
 - Examples that count: "Stop.", "Czekaj.", "O, to ważne.", "Nie tak szybko.", "Dobra, ale po ludzku."
 - Use cut-ins to create human rhythm, not chaos. Too many cut-ins make the dialogue feel chopped.
+- Do not force a cut-in before every explanation.
+- "No właśnie" is a normal reaction line, not a hard cut-in. Keep it inside a turn; do not make it a standalone cut-in.
 
 MANDATORY ENDING:
 - Do not end after only saying that the listener may feel chaos in their head.
