@@ -48,7 +48,7 @@ function splitLeadingCutIns(
   conversation: Array<{ speaker: string; text: string }>
 ): Array<{ speaker: string; text: string }> {
   const cutInPattern =
-    /^(Stop|Czekaj|No właśnie|Nie tak szybko|Dobra, ale po ludzku|O, to ważne|I tu jest haczyk|Zejdźmy na ziemię)([.!?]|,)\s+(.+)$/i;
+    /^(Stop|Czekaj|Nie tak szybko|Dobra, ale po ludzku|O, to ważne|I tu jest haczyk|Zejdźmy na ziemię)([.!?]|,)\s+(.+)$/i;
 
   const result: Array<{ speaker: string; text: string }> = [];
 
@@ -994,19 +994,26 @@ VIDEO-SAFE TURN LENGTH:
 - Every line must add at least one thing: information, emotion, joke, question, reaction, example, or callback.
 
 MANDATORY CUT-INS:
-- Include four to six standalone short cut-in turns.
+- Include four to seven standalone short cut-in turns. Aim for four to six. Never more than seven.
 - A cut-in turn is a separate speaker turn with one to seven words and no explanation attached.
 - At least four cut-ins are mandatory.
 - Do not count a longer sentence starting with "No właśnie" or "Czekaj" as a cut-in.
 - Examples that count: "Stop.", "Czekaj.", "O, to ważne.", "Nie tak szybko.", "Dobra, ale po ludzku."
-- Use cut-ins to create human rhythm, not chaos.
+- Use cut-ins to create human rhythm, not chaos. Too many cut-ins make the dialogue feel chopped.
 
 MANDATORY ENDING:
 - Do not end after only saying that the listener may feel chaos in their head.
 - The ending must include two or three short final turns.
 - It must include: one warm callback or joke, one invitation to leave a comment, one invitation to Discord, and the phrase "link jest w opisie" or "linki są w opisie".
+- The Discord invite must use warm framing: invite "pozytywnych wariatów, którzy próbują ogarnąć AI bez spiny". NEVER frame it as "ludzie, którzy też nie ogarniają" — it is warmth, not helplessness.
 - Do not say full URLs.
-- Do not end with only "Pa" or a formal goodbye.`
+- Do not end with only "Pa" or a formal goodbye.
+
+FINAL LANGUAGE CHECK:
+- Cały tekst musi być po polsku.
+- Nie używaj znaków chińskich, japońskich, koreańskich, cyrylicy ani obcych alfabetów.
+- Nie używaj angielskich zwrotów, jeśli da się powiedzieć to naturalnie po polsku.
+- Jeśli chcesz powiedzieć "sci-fi", napisz po polsku: "film science fiction" albo "film o robotach".`
         : `IMPORTANT — NATURAL PODCAST LENGTH AND VIDEO-SAFE PACING:
 - Target duration after TTS: about two to three minutes.
 - Do not force an exact number of turns.
