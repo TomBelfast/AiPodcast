@@ -30,8 +30,15 @@ type PodcastGenerationResult = {
 
 const GEMINI_EXPRESSIVE_ALLOWED_TAGS = ['[laughing]', '[sigh]', '[uhm]', '[short pause]'] as const;
 
+// Strip foreign scripts that LLMs occasionally inject (CJK, Kana, Hangul,
+// Cyrillic, Greek, Arabic, Hebrew, fullwidth forms). Keeps Latin + Polish
+// diacritics, digits, whitespace and punctuation intact.
+const FOREIGN_SCRIPT_PATTERN =
+  /[Ͱ-ϿЀ-ӿ֐-׿؀-ۿ　-〿぀-ゟ゠-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]/g;
+
 function cleanGeneratedPodcastText(text: string): string {
   return text
+    .replace(FOREIGN_SCRIPT_PATTERN, '')
     .replace(/\s+/g, ' ')
     .replace(/\s+([,.!?;:])/g, '$1')
     .trim();
