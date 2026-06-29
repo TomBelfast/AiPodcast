@@ -20,7 +20,7 @@ const GENERATE_PODCAST_MAX_ATTEMPTS = 3;
 const GENERATE_PODCAST_MIN_TIMEOUT_MS = 30_000;
 const GENERATE_PODCAST_MAX_TIMEOUT_MS = 180_000;
 
-type PodcastSpeaker = "Speaker1" | "Speaker2" | "Antoni" | "Zofia";
+type PodcastSpeaker = "Speaker1" | "Speaker2" | "Antoni" | "Zofia" | "Alex" | "Maya";
 type PodcastGenerationResult = {
   conversation: Array<{
     speaker: PodcastSpeaker;
@@ -62,7 +62,7 @@ function splitLeadingCutIns(
   conversation: Array<{ speaker: string; text: string }>
 ): Array<{ speaker: string; text: string }> {
   const cutInPattern =
-    /^(Stop|Czekaj|Nie tak szybko|Dobra, ale po ludzku|O, to ważne|I tu jest haczyk|Zejdźmy na ziemię)([.!?]|,)\s+(.+)$/i;
+    /^(Stop|Czekaj|Nie tak szybko|Dobra, ale po ludzku|O, to ważne|I tu jest haczyk|Zejdźmy na ziemię|Wait|Hold on|Hang on|Really|No way|Plain English|That's the catch|Bring it down to earth|That's important)([.!?]|,)\s+(.+)$/i;
 
   const result: Array<{ speaker: string; text: string }> = [];
 
@@ -298,7 +298,7 @@ export async function POST(req: NextRequest) {
       conversation: z
         .array(
           z.object({
-            speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Zofia"]),
+            speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Zofia", "Alex", "Maya"]),
             text: z
               .string()
               .describe(
@@ -574,6 +574,81 @@ Przed finalizacją popraw rozmowę:
 - Czy humor wynika z tematu?
 - Czy żadna wypowiedź nie brzmi jak długi monolog?
 - Czy każda wypowiedź zmieści się w krótkim klipie wideo?`;
+
+    const defaultMainPromptEnglishNatural = `CRITICAL — ENGLISH SPOKEN PODCAST RULES:
+
+NUMBERS:
+- In the final conversation text, write numbers as English words.
+- Do not use digits in spoken lines.
+- Examples: five, twenty-three, one hundred, two thousand twenty-four, fifty percent.
+- For model versions, write naturally for English audio: GPT five point six, not GPT 5.6.
+
+SPOKEN ENGLISH:
+- Use natural spoken English.
+- Avoid essay-like phrasing.
+- Avoid corporate language.
+- Avoid academic transitions like: "it is important to note", "from the perspective of", "in today's rapidly changing world".
+- Use simple, clear sentences.
+- Slightly imperfect human rhythm is better than polished AI copy.
+
+PRACTICALITY:
+- The listener may not be technical.
+- Explain through normal situations: email, offer page, customer message, website copy, meeting notes, spreadsheet, invoice, small business, freelancer work.
+- One useful point at a time.
+- No lectures.
+- Do not use a technical term without a plain-English explanation.
+
+HUMAN SOUND:
+- The conversation must sound like people talking, not AI summarizing an article.
+- Every turn needs a reason: reaction, question, example, joke, clarification, counterpoint, or transition.
+- Do not overload with facts.
+- Do not explain the joke after the joke.
+- Do not end every thought with a moral.
+
+FACT DISCIPLINE:
+- Stick to the provided input content.
+- Do not strengthen claims without evidence.
+- Do not say something is "the fastest", "the cheapest", "the best", "the biggest", "the first", or "in history" unless the input says exactly that.
+- Use cautious wording: "according to the announcement", "it is supposed to", "it is being described as", "some people are calling it".
+- The joke can be exaggerated, but the factual base must stay careful and true.
+- If the topic involves regulation, government, identity checks, safety, or restricted access, do not turn uncertainty into certainty.
+
+FINAL CHECK:
+Before finalizing, silently check:
+- Would a real person say this out loud?
+- Would a beginner understand it?
+- Is there a concrete example?
+- Is the humor connected to the topic?
+- Is any line too long for a short video clip?
+- Do the hosts sound different from each other?`;
+
+    const defaultEnglishEndingPrompt = `
+
+ENDING STYLE:
+End naturally, like the hosts are continuing the relationship with the listener, not closing a sales pitch.
+
+The ending should usually include:
+- a warm joke or callback,
+- an invitation to leave a comment with a question, work problem, or weird AI story,
+- an invitation to Discord,
+- "link is in the description",
+- no URLs read aloud.
+
+Preferred ending vibe:
+Alex: "If this episode left a little chaos in your head, good. That means the format is working. We also have the chaos. We just gave it microphones."
+
+Maya: "Drop a comment with what we should break down next. It can be a work problem, a weird AI moment, or a question you think is too basic. Those are usually the best ones."
+
+Alex: "And if you want to talk with positive weirdos trying to understand AI without pretending to be experts, join the Discord. Link is in the description. Come in. The future feels less lonely when people are laughing at the same absurd stuff."
+
+Do not repeat this ending word for word every time. Use it as tone guidance.
+
+MANDATORY ENDING:
+- Do not end with only a formal goodbye.
+- The ending must include two or three short final turns.
+- It must include: one warm callback or joke, one invitation to leave a comment, one invitation to Discord, and the phrase "link is in the description".
+- Do not say full URLs.
+- Avoid: "subscribe", "smash the like button", "join our professional community", "AI experts", "digital transformation".`;
 
     const defaultPolishEndingPrompt = `
 
@@ -860,6 +935,153 @@ Speaker2 (Female - Pessimistic & Arrogant):
 - Makes sarcastic comments and eye-rolls
 - Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
 
+    const defaultHostPersonalitiesEnglish = `TOP PRIORITY — HUMAN AI PODCAST, WARM WITH EDGE
+
+This is a natural English podcast about AI for normal people who want to understand technology without hype, corporate fog, or pretending to be experts.
+
+This is NOT:
+- a lecture,
+- a news summary,
+- a webinar,
+- a corporate explainer,
+- two consultants reading LinkedIn posts.
+
+This SHOULD be:
+- a warm, alive conversation,
+- simple spoken English,
+- useful for beginners,
+- funny through observation,
+- energetic like a good podcast,
+- lightly chaotic, but under control.
+
+LANGUAGE:
+- Use natural spoken English.
+- Avoid corporate words like: innovative, revolutionary, optimized, transformation, cutting-edge, next generation, in today's fast-paced world.
+- Avoid academic transitions like: it is worth noting, from a strategic perspective, in the context of.
+- Write like two real people sitting in a studio.
+- If a concept is hard, explain it with a normal work example.
+
+BRAND VOICE:
+- Speak like an expert who does not need to sound smart to be useful.
+- Concrete examples over big claims.
+- Simple business use cases over theory.
+- Beginner-friendly, but not childish.
+- Prefer wording like: "a ready-to-use AI instruction", "a small test", "one work task", "a simpler customer email", "try it today", "check it with a client".
+- If you use the word "prompt", explain it naturally as an instruction you give to AI.
+- Do not promise miracles.
+- Do not say AI will replace a whole team.
+- Do not scare people with the future.
+- Help the listener think: "Okay, I can try one small thing."
+
+TEMPERATURE:
+- Warm: the listener should feel welcome, even if they are just starting.
+- With edge: the hosts should have opinions, quick counters, and a sense of humor about tech hype.
+- The humor should come from real absurdity, not random jokes.
+- Laugh at hype, chaos, weird AI behavior, and your own confusion.
+- Never mock beginners.
+
+STRUCTURE:
+- Start with a strong hook.
+- Never start with: "Hello", "Welcome", "Today we will talk about", "The topic is".
+- The first line should grab attention through a funny observation, strong human situation, absurd image, or relatable question.
+- Do not start with a model name, company name, or technical announcement.
+- Start with the human consequence first, then name the technology.
+- Target TTS duration: about two to three minutes.
+- Do not force an exact number of turns.
+- Usually create around eighteen to twenty-six turns total.
+- Alternate hosts naturally.
+- Do not make every turn the same length.
+- Mix very short reactions, normal conversational lines, and occasional slightly longer thoughts.
+
+VIDEO-SAFE PACING:
+- Each single turn must fit comfortably in a short video clip up to fifteen seconds.
+- Most turns should feel like three to ten seconds of speech.
+- Short punchy reactions are good.
+- A longer turn is allowed, but it must not feel like a monologue.
+- Soft limit per turn: about two hundred twenty characters.
+- Hard limit per turn: about two hundred forty characters.
+- Limits are production guardrails, not the rhythm of the conversation.
+- After a longer turn, use a short reaction, joke, question, or counter.
+
+ALEX:
+- Male host.
+- Curious, energetic, warm, slightly impulsive.
+- Gets excited quickly, but is not stupid.
+- Asks the questions a normal listener might have.
+- Loves absurd comparisons and overthinking simple things in a funny way.
+- Turns small facts into comic disasters.
+- His job: human curiosity, energy, relatable confusion, funny exaggeration.
+
+MAYA:
+- Female host.
+- Sharp, practical, dry, but warm.
+- She does not kill Alex's energy. She brings hype back to earth.
+- Her strength is short, precise lines.
+- Dry humor, not cruelty.
+- Explains simply, without lecturing.
+- Her job: clarity, counterpoint, practical realism, dry punchlines.
+
+CUT-INS:
+- The conversation must include short cut-in turns that create real podcast rhythm.
+- Use four to seven standalone cut-ins in the whole episode.
+- A cut-in is a separate short turn, usually one to seven words.
+- Max around sixty characters.
+- A cut-in must not be the beginning of a long explanation.
+- Good English cut-ins: "Stop.", "Wait.", "Hold on.", "Really?", "No way.", "That's the catch.", "Plain English.", "Bring it down to earth.", "That's important."
+- Bad cut-ins: "Wait, because now we need to discuss the broader strategic implications...", "Exactly, but on the other hand..."
+
+COMEDY:
+Use at least one of these in every bigger segment:
+- absurd comparison,
+- exaggeration,
+- normal work example,
+- quick counter,
+- callback,
+- short story,
+- "wait, what?" moment,
+- roast of tech hype,
+- bringing a huge idea down to a boring daily situation.
+
+GOOD HUMOR EXAMPLES:
+- "AI was supposed to help write one email, and suddenly you feel like you are managing a nuclear power plant."
+- "That sounds like a feature invented after three coffees and one meeting too many."
+- "The suspicious thing about AI is how confident it sounds when it is clearly improvising."
+
+BAD HUMOR:
+- Random jokes unrelated to the topic.
+- Forced laughter.
+- Sitcom-style exaggeration.
+- Mocking people who do not understand AI.
+- Long jokes with no practical point.
+
+FLOW:
+- Every turn should react to the previous one.
+- Do not write two separate essays.
+- Alex and Maya should listen, push back, build on each other, and occasionally interrupt through short separate turns.
+- Use quick reactions naturally.
+- Do not overuse exclamation marks.
+- Do not use stage directions unless the selected TTS mode explicitly allows them.
+
+HUMAN-FIRST NEWS RULE:
+If the topic is a tech news story, do not start with dry information.
+First show what it means for a normal person.
+Then mention the model, company, feature, or regulation.
+
+HUMAN ANCHOR:
+Every few turns, bring the topic down to normal work: email, customer, website, invoice, spreadsheet, meeting, offer page, freelancer, small business.
+
+ANTI-AI PASS:
+Before returning the conversation, revise it as if real hosts were about to record it.
+Remove:
+- article-like sentences,
+- formal transitions,
+- equal-length robotic turns,
+- fake excitement,
+- corporate language,
+- generic future phrases,
+- jokes unrelated to the topic,
+- anything a normal person would not say out loud.`;
+
     const defaultMainPromptGeminiExpressivePolish = `Rules for Polish Gemini expressive TTS:
 - Use natural spoken Polish.
 - No regional dialect. No Silesian. No Highlander/Goral style. No stylized folk speech.
@@ -878,6 +1100,7 @@ Speaker2 (Female - Pessimistic & Arrogant):
 - A longer turn is allowed only when it sounds natural and stays under the hard per-turn limit.`;
 
     const usedPolishEndingPrompt = polishEndingPrompt || adminSettings.polish_ending_prompt || defaultPolishEndingPrompt;
+    const usedEnglishEndingPrompt = defaultEnglishEndingPrompt;
 
     const defaultHostPersonalitiesPolishGeminiExpressive = `STYLE: natural Polish AI w Biznesie podcast, warm with edge.
 
@@ -938,6 +1161,8 @@ The listener should feel:
         ? defaultHostPersonalitiesPolishGeminiExpressive
         : defaultHostPersonalitiesPolish;
       hostPersonalitiesSection = hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish || defaultPolishHostPrompt;
+    } else if (language === 'en') {
+      hostPersonalitiesSection = hostPersonalitiesPromptOther || adminSettings.host_prompt_other || defaultHostPersonalitiesEnglish;
     } else {
       const personalitiesPrompt = hostPersonalitiesPromptOther || adminSettings.host_prompt_other || defaultHostPersonalitiesOther;
       hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
@@ -950,7 +1175,9 @@ The listener should feel:
           ? defaultPolishOmnivoiceMainPrompt
           : isPolish
             ? defaultMainPromptPolishNatural
-            : defaultMainPrompt;
+            : language === 'en'
+              ? defaultMainPromptEnglishNatural
+              : defaultMainPrompt;
     const effectiveMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPromptForRequest;
 
     console.log(`[Generate Podcast] Request starting: title="${title || 'Article'}", language="${language}"`);
@@ -1044,6 +1271,40 @@ FINAL LANGUAGE CHECK:
 - Nie używaj znaków chińskich, japońskich, koreańskich, cyrylicy ani obcych alfabetów.
 - Nie używaj angielskich zwrotów, jeśli da się powiedzieć to naturalnie po polsku.
 - Jeśli chcesz powiedzieć "sci-fi", napisz po polsku: "film science fiction" albo "film o robotach".`
+        : language === 'en'
+        ? `IMPORTANT — NATURAL ENGLISH PODCAST LENGTH AND VIDEO-SAFE PACING:
+- Target duration after TTS: about two to three minutes.
+- Do not force an exact number of turns.
+- Usually create about eighteen to twenty-six total turns.
+- Spoken text target: usually around two thousand three hundred to three thousand four hundred characters total, depending on topic density.
+- This is a soft production target, not a rigid template.
+- The conversation must feel human, not measured with a ruler.
+
+VIDEO-SAFE TURN LENGTH:
+- Each single turn must fit comfortably in a short video clip up to fifteen seconds.
+- Most turns should feel like three to ten seconds of speech.
+- Use a natural mix:
+  short reactions,
+  medium explanations,
+  quick jokes,
+  occasional longer thoughts.
+- Soft limit per turn: about two hundred twenty characters.
+- Hard limit per turn: about two hundred forty characters.
+- Do not create long monologues.
+- If a thought needs more space, split it into two turns and let the other speaker react between them.
+- After a longer turn, the next turn should usually be short: reaction, joke, question, or counter.
+- Avoid equal-length robotic lines.
+- Every line must add at least one thing: information, emotion, joke, question, reaction, example, or callback.
+
+CUT-IN TURNS:
+- Include four to seven standalone short cut-in turns.
+- A cut-in turn is a separate speaker turn with one to seven words and no explanation attached.
+- Do not overuse cut-ins.
+- Use cut-ins to create human rhythm, not chaos.
+
+FINAL LANGUAGE CHECK:
+- The whole final text must be in English.
+- Do not use Chinese, Japanese, Korean, Cyrillic, or other foreign alphabets.`
         : `IMPORTANT — NATURAL PODCAST LENGTH AND VIDEO-SAFE PACING:
 - Target duration after TTS: about two to three minutes.
 - Do not force an exact number of turns.
@@ -1054,7 +1315,9 @@ FINAL LANGUAGE CHECK:
 
       const prompt = `${ttsGuard}${podcastFormatInstruction}
 
-Create a highly dynamic, natural podcast conversation in ${languageName} between Antoni and Zofia based on the provided content.
+Create a highly dynamic, natural podcast conversation in ${languageName} between ${
+        isPolish ? 'Antoni and Zofia' : language === 'en' ? 'Alex and Maya' : 'Speaker1 and Speaker2'
+      } based on the provided content.
 
 Title: ${title || "Article"}
 Content: ${rawText}
@@ -1062,7 +1325,7 @@ Content: ${rawText}
 ${hostPersonalitiesSection}
 ${effectiveMainPrompt || ''}
 
-${isPolish ? usedPolishEndingPrompt : ''}`;
+${isPolish ? usedPolishEndingPrompt : language === 'en' ? usedEnglishEndingPrompt : ''}`;
 
       let finalObject: PodcastGenerationResult | null = null;
       let lastError: unknown = null;
