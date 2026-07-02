@@ -1,4 +1,4 @@
-export type TtsProvider = 'elevenlabs' | 'gemini';
+export type TtsProvider = 'elevenlabs' | 'gemini' | 'openrouter';
 export type VoiceGenderBucket = 'male' | 'female' | 'unknown';
 
 export interface VoiceOption {
@@ -55,3 +55,8 @@ export const GEMINI_VOICE_OPTIONS: VoiceOption[] = [
   { id: 'Sadaltager', name: 'Sadaltager', provider: 'gemini', category: 'prebuilt', genderBucket: 'male', style: 'Knowledgeable' },
   { id: 'Sulafat', name: 'Sulafat', provider: 'gemini', category: 'prebuilt', genderBucket: 'female', style: 'Warm' },
 ];
+
+export const OPENROUTER_VOICE_OPTIONS: VoiceOption[] = GEMINI_VOICE_OPTIONS.map((voice) => ({
+  ...voice,
+  provider: 'openrouter' as const,
+}));

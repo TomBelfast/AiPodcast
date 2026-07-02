@@ -2,7 +2,27 @@
 
 Aplikacja obsługuje webhooki do automatycznego przetwarzania transkryptów i generowania podcastów.
 
-## Przepływ pracy
+> **Powiązana dokumentacja:** Szczegółowy opis integracji z SocialMedia/Matrix (architektura, fazy generowania, mechanizm callback push) znajduje się w [docs/matrix-integration.md](./docs/matrix-integration.md).
+
+---
+
+## Statusy generowania w czasie rzeczywistym
+
+Zamiast blokować HTTP do końca generowania, preferowany przepływ to:
+
+1. Wywołaj `POST /api/podcast-video/podcast-film/jobs` — odpowiedź `202` zwraca `job_id` natychmiast.
+2. Odpytuj `GET /api/podcast-video/podcast-film/jobs/{jobId}/status` co kilka sekund **lub** odbieraj pushe przez `callback_url`.
+3. Gdy `state === "done"` — pobierz artefakty (`mp4_url`, `srt_url`).
+
+**Stany (`state`):** `queued` → `running` → `done` / `failed`
+
+**Fazy (`phase`):** `preparing-input` → `generating-conversation` → `generating-audio` → `building-transcript` → `uploading-assets` → `composing-video` → `rendering-captions` → `success`
+
+**Callback push (od 2026-05-29):** Jeśli w żądaniu podasz `callback_url`, aplikacja wyśle POST na ten URL przy każdej zmianie statusu (nie tylko na końcu), co pozwala na natychmiastową aktualizację kart statusu bez polowania.
+
+---
+
+## Przepływ pracy (legacy — transkrypt → audio)
 
 1. **Odbierz transkrypt** → `/api/webhook/transcript`
 2. **Przetwórz i wygeneruj konwersację** → `/api/webhook/process`

@@ -26,6 +26,7 @@ export interface CreateDialogueRequest {
   ttsProvider?: TtsProvider;
   ttsEngine?: string;
   geminiApiKey?: string;
+  openrouterApiKey?: string;
   elevenlabsApiKey?: string;
   geminiStyle?: GeminiStyle;
   geminiTempo?: GeminiTempo;

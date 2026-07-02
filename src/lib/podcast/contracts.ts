@@ -2,7 +2,7 @@ import type { NormalizedTranscript } from '@/lib/transcript-parser';
 
 export type InputMode = 'raw_text' | 'conversation';
 export type ReviewMode = 'off' | 'pause_after_conversation';
-export type TtsProvider = 'elevenlabs' | 'gemini' | 'omnivoice';
+export type TtsProvider = 'elevenlabs' | 'gemini' | 'omnivoice' | 'openrouter';
 export type AvatarProvider = 'soulx';
 export type GeminiStyle = 'plain' | 'expressive-lite';
 export type GeminiTempo = 'normal' | 'fast';
@@ -230,6 +230,9 @@ export function normalizeTtsProvider(
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'gemini') {
     return 'gemini';
+  }
+  if (normalized === 'openrouter') {
+    return 'openrouter';
   }
   if (normalized === 'omnivoice') {
     return 'omnivoice';

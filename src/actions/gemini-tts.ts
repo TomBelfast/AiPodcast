@@ -5,6 +5,8 @@ import { CreateDialogueRequest, DialogueInput, Err, Ok, Result } from '@/types';
 import type { GeminiStyle, GeminiTempo } from '@/lib/podcast/contracts';
 
 const GEMINI_TTS_DEFAULT_MODEL = 'gemini-3.1-flash-tts-preview';
+const OPENROUTER_GEMINI_TTS_DEFAULT_MODEL = 'google/gemini-3.1-flash-tts-preview';
+const OPENROUTER_TTS_ENDPOINT = 'https://openrouter.ai/api/v1/audio/speech';
 const GEMINI_TTS_SAMPLE_RATE = 24000;
 const GEMINI_TTS_BITS_PER_SAMPLE = 16;
 const GEMINI_TTS_CHANNELS = 1;
@@ -66,7 +68,7 @@ export interface GeminiDialogueResult {
   processingTimeMs: number;
   mimeType: 'audio/wav';
   model: string;
-  provider: 'gemini';
+  provider: 'gemini' | 'openrouter';
   dryRun?: boolean;
   debug: {
     prompt: string;
@@ -326,6 +328,136 @@ function extractInlineAudioData(response: GeminiGenerateContentResponse): Buffer
   }
 
   return null;
+}
+
+async function fetchOpenRouterSpeechSegment(args: {
+  apiKey: string;
+  model: string;
+  prompt: string;
+  voiceName: string;
+}): Promise<Buffer> {
+  const response = await fetch(OPENROUTER_TTS_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${args.apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': process.env.OPENROUTER_HTTP_REFERER || process.env.NEXT_PUBLIC_APP_URL || 'https://matrix.aihub.ovh',
+      'X-Title': 'Matrix Podcast TTS',
+    },
+    body: JSON.stringify({
+      model: args.model,
+      input: args.prompt,
+      response_format: 'pcm',
+      voice: args.voiceName,
+    }),
+    signal: AbortSignal.timeout(3 * 60 * 1000),
+  });
+
+  const audio = Buffer.from(await response.arrayBuffer());
+  if (!response.ok) {
+    const detail = audio.toString('utf8').slice(0, 800);
+    throw new Error(`OpenRouter TTS HTTP ${response.status}: ${detail}`);
+  }
+
+  if (audio.length === 0) {
+    throw new Error('OpenRouter TTS returned empty audio.');
+  }
+
+  return audio;
+}
+
+export async function createOpenRouterGeminiDialogue(
+  request: CreateDialogueRequest
+): Promise<Result<GeminiDialogueResult>> {
+  const startTime = performance.now();
+  const apiKey = request.apiKey;
+
+  const assignmentResult = buildSpeakerAssignments(request.inputs);
+  if (!assignmentResult.ok) {
+    return assignmentResult;
+  }
+
+  const { speakerVoiceConfigs } = assignmentResult.value;
+  const style = resolveGeminiStyle(request);
+  const tempo = resolveGeminiTempo(request);
+  const languageCode = normalizeLanguageCode(request.language);
+  const plainText = sanitizeGeminiText((request.inputs[0]?.text || "").trim(), resolveGeminiStyle(request));
+  const prompt = buildGeminiPrompt(request.inputs, speakerVoiceConfigs, style, tempo, languageCode);
+  const model = request.modelId || OPENROUTER_GEMINI_TTS_DEFAULT_MODEL;
+  const voiceName = speakerVoiceConfigs[0]?.voiceName || 'Charon';
+
+  if (request.dryRun) {
+    return Ok({
+      processingTimeMs: Math.round(performance.now() - startTime),
+      mimeType: 'audio/wav',
+      model,
+      provider: 'openrouter',
+      dryRun: true,
+      debug: {
+        prompt,
+        speakerVoiceConfigs,
+        inputCount: request.inputs.length,
+      },
+    });
+  }
+
+  if (!apiKey) {
+    return Err('OpenRouter API key is missing.');
+  }
+
+  try {
+    let pcmAudio: Buffer | null = null;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= GEMINI_TTS_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        pcmAudio = await fetchOpenRouterSpeechSegment({
+          apiKey,
+          model,
+          prompt: plainText,
+          voiceName,
+        });
+        lastError = null;
+        break;
+      } catch (error: unknown) {
+        lastError = error;
+        const retryable = isRetryableGeminiTtsError(error);
+        if (!retryable || attempt === GEMINI_TTS_MAX_ATTEMPTS) {
+          throw error;
+        }
+
+        const delayMs = GEMINI_TTS_RETRY_BASE_DELAY_MS * attempt;
+        console.warn(
+          `[OpenRouter Gemini TTS] attempt ${attempt}/${GEMINI_TTS_MAX_ATTEMPTS} failed, retrying in ${delayMs}ms: ${getGeminiTtsErrorMessage(
+            error
+          )}`
+        );
+        await sleep(delayMs);
+      }
+    }
+
+    if (!pcmAudio) {
+      throw lastError instanceof Error ? lastError : new Error('OpenRouter TTS returned no audio.');
+    }
+
+    const wavBuffer = pcmToWav(pcmAudio);
+
+    return Ok({
+      audioBase64: `data:audio/wav;base64,${wavBuffer.toString('base64')}`,
+      processingTimeMs: Math.round(performance.now() - startTime),
+      mimeType: 'audio/wav',
+      model,
+      provider: 'openrouter',
+      debug: {
+        prompt,
+        speakerVoiceConfigs,
+        inputCount: request.inputs.length,
+      },
+    });
+  } catch (error: unknown) {
+    const message = getGeminiTtsErrorMessage(error);
+    return Err(`OpenRouter TTS error: ${message}`);
+  }
 }
 
 export async function createGeminiDialogue(

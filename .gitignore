@@ -45,6 +45,7 @@ next-env.d.ts
 
 # test files
 test-minio.js
+/test-output
 /test-output-audio
 /test-output-real-job
 

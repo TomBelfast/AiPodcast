@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getElevenLabsClient } from "@/app/actions/utils";
-import { GEMINI_VOICE_OPTIONS, VoiceOption } from "@/lib/voice-catalog";
+import { GEMINI_VOICE_OPTIONS, OPENROUTER_VOICE_OPTIONS, VoiceOption } from "@/lib/voice-catalog";
 
 interface ElevenLabsVoice {
   voice_id?: string;
@@ -41,6 +41,14 @@ export async function GET(request: Request) {
     return NextResponse.json({
       provider: "gemini",
       voices: GEMINI_VOICE_OPTIONS,
+      curatedGenderBuckets: true,
+    });
+  }
+
+  if (provider === "openrouter") {
+    return NextResponse.json({
+      provider: "openrouter",
+      voices: OPENROUTER_VOICE_OPTIONS,
       curatedGenderBuckets: true,
     });
   }

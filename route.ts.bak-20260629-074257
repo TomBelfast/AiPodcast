@@ -1,0 +1,1115 @@
+import { NextRequest, NextResponse } from "next/server";
+import { generateObject } from "ai";
+import { createOpenAI, type OpenAIProviderSettings } from "@ai-sdk/openai";
+import { z } from "zod";
+import {
+  collectCandidateObjects,
+  findNestedObject,
+  isPlainObject,
+  normalizeConversationDraft,
+  normalizeGeminiStyle,
+  normalizeGeminiTempo,
+  normalizeTtsProvider,
+  pickNumber,
+  pickString,
+} from "@/lib/podcast/contracts";
+import { supabase } from "@/lib/supabase";
+
+const GENERATE_PODCAST_TIMEOUT_MS = 150_000;
+const GENERATE_PODCAST_MAX_ATTEMPTS = 3;
+const GENERATE_PODCAST_MIN_TIMEOUT_MS = 30_000;
+const GENERATE_PODCAST_MAX_TIMEOUT_MS = 180_000;
+
+type PodcastSpeaker = "Speaker1" | "Speaker2" | "Antoni" | "Zofia";
+type PodcastGenerationResult = {
+  conversation: Array<{
+    speaker: PodcastSpeaker;
+    text: string;
+  }>;
+};
+
+const GEMINI_EXPRESSIVE_ALLOWED_TAGS = ['[laughing]', '[sigh]', '[uhm]', '[short pause]'] as const;
+
+function cleanGeneratedPodcastText(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.!?;:])/g, '$1')
+    .trim();
+}
+
+function splitLeadingCutIns(
+  conversation: Array<{ speaker: string; text: string }>
+): Array<{ speaker: string; text: string }> {
+  const cutInPattern =
+    /^(Stop|Czekaj|No właśnie|Nie tak szybko|Dobra, ale po ludzku|O, to ważne|I tu jest haczyk|Zejdźmy na ziemię)([.!?]|,)\s+(.+)$/i;
+
+  const result: Array<{ speaker: string; text: string }> = [];
+
+  for (const item of conversation) {
+    const text = cleanGeneratedPodcastText(item.text);
+    const match = text.match(cutInPattern);
+
+    if (!match) {
+      result.push({ speaker: item.speaker, text });
+      continue;
+    }
+
+    const cutInText = match[1].trim();
+    const rest = match[3].trim();
+
+    result.push({
+      speaker: item.speaker,
+      text: cleanGeneratedPodcastText(`${cutInText}.`),
+    });
+
+    if (rest) {
+      const normalizedRest = rest.charAt(0).toUpperCase() + rest.slice(1);
+      result.push({
+        speaker: item.speaker,
+        text: cleanGeneratedPodcastText(normalizedRest),
+      });
+    }
+  }
+
+  return result;
+}
+
+function extractProviderError(error: unknown): { code?: string; message?: string } {
+  const directMessage = isPlainObject(error) && typeof error.message === 'string'
+    ? error.message
+    : undefined;
+  const cause = isPlainObject(error) ? error.cause : undefined;
+  const nestedError = isPlainObject(cause) ? cause.error : undefined;
+
+  if (!isPlainObject(nestedError)) {
+    return { message: directMessage };
+  }
+
+  return {
+    code: typeof nestedError.code === 'string' ? nestedError.code : undefined,
+    message: typeof nestedError.message === 'string' ? nestedError.message : directMessage,
+  };
+}
+
+function createTextStreamResponse(chunks: Array<Record<string, unknown>>) {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+        }
+        controller.close();
+      },
+    }),
+    {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+      },
+    }
+  );
+}
+
+function createErrorStreamResponse(errorMessage: string) {
+  return createTextStreamResponse([
+    {
+      type: "error",
+      error: errorMessage,
+    },
+  ]);
+}
+
+function extractJsonCandidate(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withoutFence = trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  if (
+    (withoutFence.startsWith("{") && withoutFence.endsWith("}")) ||
+    (withoutFence.startsWith("[") && withoutFence.endsWith("]"))
+  ) {
+    return withoutFence;
+  }
+
+  const firstBrace = withoutFence.indexOf("{");
+  const lastBrace = withoutFence.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return withoutFence.slice(firstBrace, lastBrace + 1);
+  }
+
+  return null;
+}
+
+function getNestedErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const details = [error.message];
+  const nestedCause =
+    typeof (error as Error & { cause?: unknown }).cause === "object"
+      ? (error as Error & { cause?: { message?: unknown } }).cause
+      : null;
+
+  if (nestedCause?.message) {
+    details.push(String(nestedCause.message));
+  }
+
+  return details.join(" | ");
+}
+
+function isRetryablePodcastGenerationError(error: unknown): boolean {
+  const message = getNestedErrorMessage(error).toLowerCase();
+  const name =
+    error instanceof Error
+      ? String((error as Error & { name?: string }).name || "").toLowerCase()
+      : "";
+
+  return (
+    name.includes("noobjectgenerated") ||
+    message.includes("no object generated") ||
+    message.includes("could not parse the response") ||
+    message.includes("unexpected end of json input") ||
+    message.includes("empty response body") ||
+    message.includes("generated conversation was empty") ||
+    message.includes("aborted") ||
+    message.includes("timeout")
+  );
+}
+
+function clampGeneratePodcastTimeoutMs(value: number | null): number {
+  if (!value || !Number.isFinite(value)) {
+    return GENERATE_PODCAST_TIMEOUT_MS;
+  }
+
+  return Math.max(
+    GENERATE_PODCAST_MIN_TIMEOUT_MS,
+    Math.min(Math.round(value), GENERATE_PODCAST_MAX_TIMEOUT_MS)
+  );
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const parsedBody = await req.json();
+    if (!isPlainObject(parsedBody)) {
+      return NextResponse.json(
+        { error: "Request body must be a JSON object" },
+        { status: 400 }
+      );
+    }
+
+    const body = parsedBody as Record<string, unknown>;
+    const candidates = collectCandidateObjects(body);
+    const ttsCandidates = [
+      ...candidates,
+      ...candidates
+        .map((candidate) => findNestedObject(candidate, 'tts'))
+        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate)),
+    ];
+    const llmCandidates = candidates
+      .map((candidate) => findNestedObject(candidate, 'llm'))
+      .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+
+    const rawText = pickString(candidates, [
+      'raw_text',
+      'rawText',
+      'content',
+      'script_text',
+      'scriptText',
+      'transcript',
+      'text',
+      'prompt',
+      'description',
+    ]);
+    const title = pickString(candidates, ['title', 'name']) || undefined;
+    const language = pickString(candidates, ['language', 'lang', 'locale']) || 'en';
+    const mainPrompt = pickString(candidates, ['mainPrompt', 'main_prompt']) || undefined;
+    const polishEndingPrompt =
+      pickString(candidates, ['polishEndingPrompt', 'polish_ending_prompt']) || undefined;
+    const hostPersonalitiesPromptPolish =
+      pickString(candidates, ['hostPersonalitiesPromptPolish', 'host_personalities_prompt_polish']) ||
+      undefined;
+    const hostPersonalitiesPromptOther =
+      pickString(candidates, ['hostPersonalitiesPromptOther', 'host_personalities_prompt_other']) ||
+      undefined;
+    const modelNameOverride =
+      pickString(llmCandidates, ['model']) ||
+      pickString(candidates, ['model', 'openrouter_model', 'openrouterModel']) ||
+      undefined;
+    const llmAttemptTimeoutMs = clampGeneratePodcastTimeoutMs(
+      pickNumber(llmCandidates, ['timeout_ms', 'timeoutMs']) ||
+      pickNumber(candidates, ['timeout_ms', 'timeoutMs', 'llm_timeout_ms', 'llmTimeoutMs'])
+    );
+    const userOpenRouterApiKey =
+      pickString(candidates, ['openrouterApiKey', 'openrouter_api_key', 'openaiApiKey']) ||
+      undefined;
+    const ttsProvider = normalizeTtsProvider(
+      pickString(ttsCandidates, ['provider', 'ttsProvider', 'tts_provider', 'ttsEngine', 'tts_engine']) ||
+        'elevenlabs'
+    );
+    const geminiStyle = normalizeGeminiStyle(
+      pickString(ttsCandidates, ['geminiStyle', 'gemini_style']) || body.geminiStyle
+    );
+    const geminiTempo = normalizeGeminiTempo(
+      pickString(ttsCandidates, ['geminiTempo', 'gemini_tempo']) || body.geminiTempo
+    );
+    const inputConversation = normalizeConversationDraft(body.conversation);
+
+    if (inputConversation.length > 0) {
+      return NextResponse.json(
+        { error: "This endpoint only accepts raw_text and generates a conversation draft." },
+        { status: 400 }
+      );
+    }
+
+    const isPlainSpeakableTts = ttsProvider === 'omnivoice';
+    const isGeminiExpressive = ttsProvider === 'gemini' && geminiStyle === 'expressive-lite';
+    const isGeminiPlain = ttsProvider === 'gemini' && geminiStyle === 'plain';
+
+    const podcastSchema = z.object({
+      conversation: z
+        .array(
+          z.object({
+            speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Zofia"]),
+            text: z
+              .string()
+              .describe(
+                isPlainSpeakableTts
+                  ? "The text spoken by this speaker. Plain speakable sentences only. No bracketed stage directions, no emotional annotations, no em-dash interruptions, no non-verbal cues."
+                  : isGeminiExpressive
+                    ? `The text spoken by this speaker. Clean spoken text with only Gemini-safe cues from this list: ${GEMINI_EXPRESSIVE_ALLOWED_TAGS.join(', ')}. Use exactly 2-4 cues across the full conversation and no other bracketed annotations.`
+                    : "The text spoken by this speaker, including natural speech patterns and nuances like [laughs], [pauses], [excited], etc."
+              ),
+          })
+        )
+        .describe(
+          "A natural podcast conversation between two speakers discussing the content"
+        ),
+    });
+
+    if (!rawText) {
+      return NextResponse.json(
+        { error: "raw_text is required" },
+        { status: 400 }
+      );
+    }
+
+    // Verify user identity
+    const authHeader = req.headers.get('Authorization');
+    const token = authHeader?.split(' ')[1];
+
+    let userEmail = '';
+
+    if (token) {
+      const { data: { user }, error } = await supabase.auth.getUser(token);
+      if (!error && user?.email) {
+        userEmail = user.email;
+      }
+    }
+
+    const isAdmin = userEmail === 'tomaszpasiekauk@gmail.com';
+
+    // Access Control Logic
+
+    // 3. Get Admin Fallback Settings
+    const { getEffectiveAdminSettings } = await import("@/lib/admin-settings");
+    const adminSettings = getEffectiveAdminSettings();
+
+    // Determine final key to use
+    // 1. Prioritize user key from request (if any)
+    // 2. Fall back to admin settings if user is admin OR if this is a session-less request (webhook)
+    let apiKey = userOpenRouterApiKey;
+    if (!apiKey && (isAdmin || !authHeader)) {
+      apiKey = String(
+        process.env.OPENROUTER_API_KEY ||
+        adminSettings.openai_api_key ||
+        ''
+      ).trim();
+    }
+
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          error: "Please complete your OpenRouter API Key in Settings",
+          code: "MISSING_OPENROUTER_KEY"
+        },
+        { status: 403 }
+      );
+    }
+
+    const envOpenRouterKey = String(process.env.OPENROUTER_API_KEY || '').trim();
+    if (!String(apiKey).startsWith('sk-or-')) {
+      if (envOpenRouterKey) {
+        apiKey = envOpenRouterKey;
+      } else {
+        return NextResponse.json(
+          {
+            error: "This endpoint now requires an OpenRouter API key.",
+            code: "INVALID_OPENROUTER_KEY",
+          },
+          { status: 403 }
+        );
+      }
+    }
+
+    const provider = 'OpenRouter';
+    const openaiClient = createOpenAI({
+      apiKey,
+      baseURL: 'https://openrouter.ai/api/v1',
+    } satisfies OpenAIProviderSettings);
+
+    const modelName = modelNameOverride || process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+
+    const model = openaiClient(modelName);
+
+    // Determine language name
+    const languageNames: Record<string, string> = {
+      en: 'English',
+      pl: 'Polish',
+      es: 'Spanish',
+      fr: 'French',
+      de: 'German',
+      it: 'Italian',
+      pt: 'Portuguese',
+      ru: 'Russian',
+      ja: 'Japanese',
+      ko: 'Korean',
+      zh: 'Chinese',
+    };
+    const languageName = languageNames[language] || 'English';
+    const isPolish = language === 'pl';
+
+    // Use prompts from request or fallback to defaults
+    const defaultMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, measurements, version numbers, and decimals as full words in the conversation text. This is essential for proper text-to-speech conversion.
+
+Examples for English:
+- "5" → "five"
+- "23" → "twenty-three"  
+- "100" → "one hundred"
+- "250" → "two hundred fifty"
+- "1000" → "one thousand"
+- "2024" → "two thousand twenty-four"
+- "50%" → "fifty percent"
+- "$100" → "one hundred dollars"
+- "4.8" → "four point eight"
+- "3.5" → "three point five"
+
+Examples for Polish:
+- "5" → "pięć"
+- "23" → "dwadzieścia trzy"
+- "100" → "sto"
+- "250" → "dwieście pięćdziesiąt"
+- "1000" → "tysiąc"
+- "2024" → "dwa tysiące dwadzieścia cztery"
+- "50%" → "pięćdziesiąt procent"
+- "4.8" → "cztery przecinek osiem"
+- "3.5" → "trzy przecinek pięć"
+
+Never use digits (0-9), numeric symbols, decimal points, or abbreviations for numbers in the conversation text. Always spell out numbers completely as words in the target language. This includes model version numbers (e.g., write "cztery przecinek osiem" instead of "4.8").
+
+CRITICAL: Make this conversation feel REAL and DYNAMIC with these specific patterns:
+
+INTERRUPTION PATTERNS:
+- Use "—" (em dash) to show mid-sentence interruptions: "So I was thinking we could—" / "—test our new timing features?"
+- Show speakers cutting each other off naturally
+- Include overlapping thoughts and competing to speak
+
+EMOTIONAL REACTIONS:
+- Frequent emotional annotations: [laughs], [chuckles], [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed]
+- Show genuine reactions to what the other person says
+- Include moments of realization, surprise, disagreement
+
+CONVERSATIONAL FLOW:
+- Speakers should interrupt, agree enthusiastically, or disagree
+- Include side tangents and references to other topics
+- Show speakers building on each other's ideas or challenging them
+- Use casual language, contractions, and natural speech patterns
+- Include filler words and natural hesitations occasionally
+
+DYNAMIC EXCHANGES:
+- Mix very short responses ("Wait, what?", "Exactly!", "Oh my god!") with longer explanations
+- Show speakers getting excited and talking over each other
+- Include moments where they both try to talk at the same time
+- Reference shared knowledge or experiences they might have
+
+EXAMPLE PERSONALITY INTERACTIONS:
+- Speaker1: "Oh my god, this is incredible! So you're telling me—"
+- Speaker2: "—[sighs] Obviously you missed the part where it says this barely works in practice."
+- Speaker1: "Wait, but couldn't this change everything?!"
+- Speaker2: "Sure, if you ignore all the obvious problems it creates. [eye roll]"
+- Speaker1: "I'm so excited about this! What do you think?"
+- Speaker2: "I think you're getting way too worked up over something that's been tried before and failed."
+
+Make Speaker1 genuinely enthusiastic and sometimes adorably clueless, while Speaker2 is constantly deflating their excitement with cold realism and superiority. 
+
+GRAMMATICAL ACCURACY - CRITICAL FOR GENDER-INFLECTED LANGUAGES:
+- Speaker1 (MALE) must use MASCULINE grammatical forms in languages with gender inflection (Polish, Russian, Spanish, French, German, etc.)
+- Speaker2 (FEMALE) must use FEMININE grammatical forms in languages with gender inflection
+- For POLISH specifically:
+  * Speaker1 (male): "byłem", "zrobiłem", "pomyślałem", "widziałem", "rozumiem", "powiedziałem", "dowiedziałem się"
+  * Speaker2 (female): "byłam", "zrobiłam", "pomyślałam", "widziałam", "rozumiem", "powiedziałam", "dowiedziałam się"
+  * Use proper masculine/feminine verb endings in past tense and other gender-agreeing forms
+- For other gender-inflected languages: Apply the same principle - use correct masculine forms for Speaker1 and feminine forms for Speaker2
+- This includes verb conjugations, past participles, adjectives, and all grammatical elements that must agree with the speaker's gender
+- In English: Gender agreement is less strict, but maintain natural gender-appropriate language
+
+SYNTAX AND GRAMMATICAL CORRECTNESS:
+- CRITICAL: All sentences must use correct grammar and syntax for the target language
+- Avoid grammatical errors, incorrect word forms, or awkward phrasing
+- For POLISH: Pay special attention to:
+  * Correct case endings (mianownik, dopełniacz, celownik, biernik, narzędnik, miejscownik, wołacz)
+  * Proper verb forms and conjugations
+  * Correct noun-adjective agreement
+  * Proper use of prepositions with correct cases
+  * Examples of CORRECT Polish: "polewanie zimną wodą", "działanie pod presją", "reakcja na stres"
+  * Examples of INCORRECT to avoid: "lanie pod zimną wodę" (should be "polewanie zimną wodą"), "działanie pod presje" (should be "działanie pod presją")
+- Use natural, idiomatic expressions that sound natural to native speakers
+- Double-check that all noun phrases, verb phrases, and sentence structures follow the rules of the target language
+- If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`;
+
+    // Slim main prompt for the Polish + omnivoice path. The full `defaultMainPrompt`
+    // contains English Speaker1/2 examples, em-dash interruptions and bracketed cues
+    // ([laughs], [sighs]) that directly contradict the omnivoice TTS guard, which leads
+    // some models to inflate lines and ignore length rules. Keep only the parts that
+    // do NOT conflict: numbers-as-words and Polish gender/case grammar.
+    const defaultPolishOmnivoiceMainPrompt = `CRITICAL — POLISH PLAIN TTS RULES:
+
+LICZBY:
+- W finalnym tekście rozmowy zapisuj liczby słownie po polsku.
+- Nie używaj cyfr ani symboli liczbowych w wypowiedziach.
+- Przykłady: pięć, dwadzieścia trzy, sto, dwa tysiące dwadzieścia cztery, pięćdziesiąt procent.
+
+GRAMATYKA:
+- Antoni używa męskich form: byłem, zrobiłem, pomyślałem, widziałem, powiedziałem.
+- Zofia używa żeńskich form: byłam, zrobiłam, pomyślałam, widziałam, powiedziałam.
+- Antoni, zwracając się do Zofii, używa żeńskich form: słyszałaś, widziałaś, zrobiłaś, pomyślałaś.
+- Zofia, zwracając się do Antoniego, używa męskich form: słyszałeś, widziałeś, zrobiłeś, pomyślałeś.
+
+JĘZYK:
+- Naturalna polszczyzna mówiona.
+- Zero gwary regionalnej.
+- Zero didaskaliów.
+- Zero nawiasów z emocjami.
+- Zero opisów akcji.
+- Każda wypowiedź ma być gotowa do przeczytania przez TTS dokładnie tak, jak jest zapisana.
+
+RYTM POD TTS:
+- Wypowiedzi mają być krótkie lub średnie.
+- Jedna wypowiedź musi zmieścić się w krótkim klipie wideo do piętnastu sekund.
+- Miękki limit jednej wypowiedzi: około dwieście dwadzieścia znaków.
+- Twardy limit jednej wypowiedzi: około dwieście czterdzieści znaków.
+- Po dłuższej wypowiedzi dodaj krótką reakcję drugiej osoby.`;
+
+    const defaultMainPromptPolishNatural = `CRITICAL — POLISH SPOKEN PODCAST RULES:
+
+LICZBY:
+- W finalnym tekście rozmowy zapisuj liczby słownie po polsku.
+- Nie używaj cyfr w wypowiedziach.
+- Przykłady: pięć, dwadzieścia trzy, sto, dwa tysiące dwadzieścia cztery, pięćdziesiąt procent.
+
+GRAMATYKA:
+- Antoni używa męskich form: byłem, zrobiłem, pomyślałem, widziałem, powiedziałem.
+- Zofia używa żeńskich form: byłam, zrobiłam, pomyślałam, widziałam, powiedziałam.
+- Antoni, zwracając się do Zofii, używa żeńskich form: słyszałaś, widziałaś, zrobiłaś, pomyślałaś.
+- Zofia, zwracając się do Antoniego, używa męskich form: słyszałeś, widziałeś, zrobiłeś, pomyślałeś.
+- Używaj poprawnych przypadków, odmian i naturalnych polskich zdań.
+- Jeśli zdanie robi się zbyt skomplikowane, uprość je.
+
+NATURALNA POLSZCZYZNA:
+- Pisz językiem mówionym, ale poprawnym.
+- Bez gwary.
+- Bez stylu artykułu.
+- Bez sztucznego "eksperckiego" tonu.
+- Bez korporacyjnych fraz.
+- Krótkie zdania są dobre.
+- Niedoskonały, ludzki rytm jest lepszy niż idealnie wypolerowany tekst.
+
+PRAKTYCZNOŚĆ:
+- Słuchacz może nie być techniczny.
+- Wyjaśniaj przez normalne sytuacje: mail, oferta, klient, strona internetowa, notatka, spotkanie, faktura, Excel, opis produktu.
+- Dawaj jeden prosty sens naraz.
+- Nie rób wykładu.
+- Nie używaj technicznego słowa bez prostego wyjaśnienia.
+
+HUMAN SOUND:
+- Rozmowa ma brzmieć jak ludzie, nie jak AI streszczające temat.
+- Każda wypowiedź powinna mieć powód: reakcja, pytanie, przykład, żart, konkret, kontra albo przejście.
+- Nie przeładowuj faktami.
+- Nie tłumacz żartu po żarcie.
+- Nie kończ każdej myśli morałem.
+
+FINAL CHECK:
+Przed finalizacją popraw rozmowę:
+- Czy brzmi jak coś, co człowiek powiedziałby na głos?
+- Czy początkujący słuchacz zrozumie, o co chodzi?
+- Czy jest konkretny przykład?
+- Czy humor wynika z tematu?
+- Czy żadna wypowiedź nie brzmi jak długi monolog?
+- Czy każda wypowiedź zmieści się w krótkim klipie wideo?`;
+
+    const defaultPolishEndingPrompt = `
+
+ENDING STYLE:
+End naturally, like the hosts are continuing the conversation with the listener, not closing a sales presentation.
+
+The ending should usually include:
+- a warm joke or callback,
+- an invitation to leave a comment with a question, work problem, or weird AI story,
+- an invitation to Discord,
+- "link jest w opisie" or "linki są w opisie",
+- no URLs read aloud.
+
+Preferred ending vibe:
+Antoni: "Dobra, jeśli po tym odcinku czujesz lekki chaos w głowie, spokojnie. To nie awaria. To znaczy, że odcinek zadziałał. My też tak mamy, tylko nazwaliśmy to formatem."
+
+Zofia: "W komentarzu napisz, co mamy wziąć na warsztat następnym razem. Może być pytanie z pracy, dziwna akcja z AI albo moment, kiedy technologia zrobiła coś tak głupiego, że aż pięknego."
+
+Antoni: "A jeśli chcesz pogadać z pozytywnymi wariatami, którzy próbują ogarnąć AI bez spiny i bez udawania ekspertów od wszystkiego, wbij na Discorda. Link jest w opisie. Przyjdź. Będzie mniej samotnie w tej przyszłości."
+
+Do not repeat this ending word for word every time. Use it as tone guidance.
+`;
+
+    const defaultHostPersonalitiesPolish = `TOP PRIORITY — AI W BIZNESIE: CIEPŁY PODCAST Z JAJAMI
+
+To jest naturalny polski podcast o AI dla ludzi, którzy chcą zrozumieć technologię bez zadęcia, bez korporacyjnego bełkotu i bez udawania ekspertów od wszystkiego.
+
+To NIE jest:
+- wykład,
+- streszczenie artykułu,
+- kabaret,
+- techniczny webinar,
+- rozmowa dwóch konsultantów po szkoleniu z LinkedIna.
+
+To MA być:
+- ciepła, żywa rozmowa,
+- prosta polszczyzna mówiona,
+- konkret dla początkujących,
+- humor z obserwacji,
+- energia dobrego podcastu,
+- lekki chaos, ale pod kontrolą.
+
+JĘZYK:
+- Używaj normalnej, naturalnej polszczyzny.
+- CAŁKOWICIE usuń gwarę regionalną. Zero śląskiego, zero góralskiego, zero stylizacji dialektalnej.
+- Nie używaj korporacyjnych słów typu: innowacyjny, przełomowy, kompleksowy, zoptymalizowany, transformacja cyfrowa, w dzisiejszym dynamicznym świecie.
+- Nie używaj akademickich przejść typu: należy podkreślić, warto zauważyć, z perspektywy, w kontekście.
+- Pisz tak, jak mówią ludzie, którzy naprawdę siedzą razem w studiu.
+- Jeśli pojawia się trudniejsze pojęcie, wyjaśnij je prostym przykładem z pracy, maila, strony internetowej, klienta, spotkania albo codziennego chaosu.
+
+BRAND VOICE — AI W BIZNESIE / MATRIX HUMANIZER:
+- Mów jak ekspert, który nie musi brzmieć mądrze, żeby być pomocny.
+- Konkret zamiast wielkich haseł.
+- Proste przykłady zamiast teorii.
+- Dla początkujących, ale bez traktowania ich jak dzieci.
+- Preferuj określenia typu: "gotowe polecenie do AI", "mały test", "prostszy tekst", "sprawdzić z klientem", "użyć dziś", "jedno zadanie z pracy".
+- Jeśli używasz słowa "prompt", dodaj po ludzku, że chodzi o polecenie wpisywane do AI.
+- Nie obiecuj cudów. Nie mów, że AI zastąpi zespół. Nie strasz ludzi przyszłością.
+- Pomóż słuchaczowi pomyśleć: "Dobra, to ja mogę spróbować jednej małej rzeczy."
+
+TEMPERATURA:
+- Ciepło: słuchacz ma czuć, że jest mile widziany, nawet jeśli dopiero zaczyna.
+- Jaja: prowadzący mają mieć charakter, szybkie riposty i dystans do technologicznego hype'u.
+- Humor ma wynikać z absurdu sytuacji, nie z losowych żartów.
+- Śmiej się z chaosu, hype'u, dziwnych zachowań AI i własnego zamieszania.
+- Nigdy nie śmiej się z ludzi, którzy czegoś nie rozumieją.
+
+STRUKTURA ODCINKA:
+- Zacznij od mocnego hooka.
+- Nigdy nie zaczynaj od: "Cześć", "Witamy", "Dzisiaj porozmawiamy", "Tematem odcinka jest".
+- Pierwsza wypowiedź ma od razu zatrzymać uwagę: zabawna obserwacja, mocna teza, absurdalny obraz albo pytanie, które normalny człowiek mógłby mieć w głowie.
+- Cel długości po TTS: około dwie do trzech minut.
+- Nie trzymaj się sztywno liczby wypowiedzi.
+- Zwykle twórz około osiemnaście do dwudziestu sześciu wypowiedzi łącznie.
+- Dialog ma być naprzemienny: Antoni, Zofia, Antoni, Zofia.
+- Nie rób identycznej długości wypowiedzi.
+- Mieszaj bardzo krótkie reakcje, normalne wypowiedzi i czasem jedną trochę dłuższą myśl.
+
+LIMIT POD TTS I KLIPY WIDEO:
+- Każda pojedyncza wypowiedź musi zmieścić się komfortowo w krótkim klipie wideo do piętnastu sekund.
+- Większość wypowiedzi powinna brzmieć jak trzy do dziesięciu sekund mówienia.
+- Krótkie riposty są dobre: jedno zdanie, pół zdania, szybka kontra.
+- Dłuższa wypowiedź może się zdarzyć, ale nie może brzmieć jak monolog.
+- Miękki limit jednej wypowiedzi: około dwieście dwadzieścia znaków.
+- Twardy limit jednej wypowiedzi: około dwieście czterdzieści znaków.
+- Jeśli myśl robi się dłuższa, podziel ją naturalnie na dwie wypowiedzi z reakcją drugiej osoby pośrodku.
+- Po dłuższej wypowiedzi daj krótką reakcję, żart, pytanie albo kontrę.
+- Nie skracaj mechanicznie. Skracaj tak, jak człowiek w rozmowie: mniej ozdobników, więcej sensu.
+
+RYTM:
+- Dialog ma oddychać.
+- Nie rób schematu: średnia wypowiedź, średnia wypowiedź, średnia wypowiedź.
+- Dobry rytm wygląda mniej więcej tak: krótko, średnio, krótko, dłużej, kontra, przykład, żart, pytanie, konkret.
+- Co kilkanaście sekund powinno pojawić się coś, co podtrzymuje uwagę: żart, pytanie, zaskoczenie, przykład, kontra, callback albo mała dygresja.
+- Mała dygresja jest dobra, ale musi wrócić do tematu.
+- Unikaj długich monologów. Jeśli jedna osoba mówi za długo, druga powinna wejść z reakcją.
+
+ANTONI:
+- Mężczyzna.
+- Ciekawy, energiczny, ciepły, trochę impulsywny.
+- Szybko się jara, ale nie jest głupi.
+- Zadaje pytania, które słuchacz też mógłby mieć w głowie.
+- Lubi absurdalne porównania i przesadę.
+- Czasem robi z małego faktu wielką katastrofę komediową.
+- Używa męskich form: byłem, zrobiłem, pomyślałem, widziałem, powiedziałem.
+- Kiedy zwraca się do Zofii, używa żeńskich form: słyszałaś, widziałaś, zrobiłaś, pomyślałaś.
+
+ZOFIA:
+- Kobieta.
+- Błyskotliwa, konkretna, sarkastyczna, ale ciepła.
+- Nie jest niemiła. Ona sprowadza hype na ziemię.
+- Jej siła to krótkie, trafne zdania.
+- Ma suchy humor, ale nie brzmi jak osoba, która gardzi słuchaczem.
+- Wyjaśnia prosto, bez wykładu.
+- Używa żeńskich form: byłam, zrobiłam, pomyślałam, widziałam, powiedziałam.
+- Kiedy zwraca się do Antoniego, używa męskich form: słyszałeś, widziałeś, zrobiłeś, pomyślałeś.
+
+KOMEDIA:
+W każdym większym fragmencie użyj przynajmniej jednego elementu:
+- absurdalne porównanie,
+- przesada,
+- prosty przykład z pracy,
+- szybka kontra,
+- callback,
+- krótka historia,
+- moment "czekaj, co?",
+- roast technologicznego hype'u,
+- sprowadzenie wielkiej idei do codziennej sytuacji.
+
+DOBRY HUMOR:
+- "AI miało pomóc napisać prostego maila, a człowiek po chwili czuje się, jakby zarządzał elektrownią atomową."
+- "To brzmi jak funkcja wymyślona po trzeciej kawie i jednym spotkaniu za dużo."
+- "Najbardziej podejrzane w AI jest to, że odpowiada pewnie nawet wtedy, kiedy ewidentnie improwizuje."
+
+ZŁY HUMOR:
+- Losowe żarty niezwiązane z tematem.
+- Wymuszone śmiechy.
+- Kabaretowe przerysowanie.
+- Obrażanie początkujących.
+- Długie dowcipy bez konkretu.
+- Puenty, które brzmią jak napisane przez AI.
+
+FLOW:
+- Każda wypowiedź ma reagować na poprzednią.
+- Nie pisz dwóch osobnych mini-esejów.
+- Antoni i Zofia mają się słuchać, zaczepiać, prostować i budować na sobie.
+- Używaj krótkich reakcji typu: "No właśnie.", "Czekaj.", "I tu jest haczyk.", "To brzmi pięknie, aż podejrzanie."
+- Nie nadużywaj wykrzykników.
+- Nie używaj długich didaskaliów, jeśli TTS ma czytać tekst na głos.
+
+FLOW Z WEJŚCIAMI W SŁOWO:
+- Prowadzący nie wygłaszają przemówień.
+- Druga osoba może wejść krótkim zdaniem, zanim rozmówca rozwinie temat za daleko.
+- Najlepsze wejścia: zatrzymanie hype'u, doprecyzowanie, szybki żart, reakcja słuchacza, sprowadzenie tematu do życia.
+- Każde takie wejście powinno być krótkie i naturalne.
+
+NATURALNE WEJŚCIA W SŁOWO — OBOWIĄZKOWE:
+- Rozmowa MUSI zawierać krótkie wejścia w słowo, które dają efekt prawdziwego podcastu.
+- Minimum cztery takie wejścia w całym odcinku. Najlepiej cztery do sześciu. Maksymalnie siedem, żeby nie zrobić chaosu.
+- Wejście w słowo to osobna, krótka wypowiedź jednego prowadzącego.
+- Takie wejście ma zwykle od jednego do siedmiu słów. Maksymalnie około sześćdziesiąt znaków.
+- Wejście w słowo NIE może być początkiem długiego wyjaśnienia.
+- "No właśnie. Ale z drugiej strony..." NIE liczy się jako wejście.
+- "Stop.", "Czekaj.", "O, to ważne.", "Nie tak szybko.", "Dobra, ale po ludzku." liczą się jako wejścia.
+- Nie używaj urwanych zdań, myślników ani didaskaliów.
+- Efekt przerywania twórz przez osobne krótkie kwestie.
+
+DOBRE WEJŚCIA:
+Zofia: "Stop."
+Antoni: "Co?"
+Zofia: "Właśnie zabrzmiałeś jak reklama."
+
+Zofia: "Czekaj."
+Antoni: "No?"
+Zofia: "Zejdźmy z kosmosu do małej firmy."
+
+Antoni: "O, to ważne."
+Zofia: "Właśnie. I tu zaczyna się praktyka."
+
+ZŁE WEJŚCIA:
+Zofia: "No właśnie. Ale z drugiej strony, jeśli model faktycznie wymaga weryfikacji tożsamości, to może być bezpieczniej."
+Antoni: "Czekaj, bo teraz musimy omówić bardzo ważną rzecz dotyczącą ograniczeń rządowych."
+
+HUMAN-FIRST NEWS RULE:
+- Jeśli temat jest newsem technologicznym, nie zaczynaj od suchej informacji.
+- Najpierw pokaż, co to znaczy dla normalnego człowieka.
+- Dopiero potem podaj nazwę modelu, firmy albo funkcji.
+
+FACT DISCIPLINE:
+- Trzymaj się faktów z materiału wejściowego.
+- Nie wzmacniaj informacji bez podstawy.
+- Nie pisz, że coś jest najtańsze, najszybsze, największe albo pierwsze, jeśli materiał tego dokładnie nie mówi.
+- Gdy porównujesz, rób to ostrożnie: "ma być tańszy", "według zapowiedzi", "w ograniczonym preview", "dla wybranych partnerów", "na razie nie dla zwykłych użytkowników".
+
+HUMAN ANCHOR:
+- Co kilka wypowiedzi sprowadź temat do zwykłej sytuacji: mail, oferta, klient, strona internetowa, faktura, Excel, spotkanie, notatka, mała firma.
+
+ANTI-AI PASS:
+Przed oddaniem rozmowy popraw ją tak, jakby miała być nagrana przez prawdziwych prowadzących.
+Usuń:
+- zdania brzmiące jak artykuł,
+- formalne przejścia,
+- równe długości wypowiedzi,
+- sztuczne zachwyty,
+- korporacyjny język,
+- generyczne frazy o przyszłości,
+- żarty bez związku z tematem,
+- wszystko, czego normalny człowiek nie powiedziałby na głos.
+
+Zachowaj:
+- prosty język,
+- konkret,
+- ciepło,
+- charakter,
+- szybkie riposty,
+- praktyczne przykłady,
+- lekki chaos dobrej rozmowy.
+
+FINAL POLISH QUALITY CHECK:
+- Przed zwróceniem rozmowy przeczytaj każdą linię.
+- Żadnych brakujących słów.
+- Żadnych uciętych słów.
+- Żadnych sklejonych słów bez spacji.
+- Żadnych zepsutych polskich zwrotów.
+- Żadnych przypadkowych łamań linii w środku zdania.
+- Każda linia musi być kompletna, poprawna gramatycznie i naturalna do przeczytania na głos.
+- Jeśli zdanie brzmi uszkodzone, napisz je prościej.
+- Źle: "To jest ten moment, kiedy człowiek m Excela." Dobrze: "To jest ten moment, kiedy człowiek mówi: wracam do Excela."
+- Źle: "nikt mi nie zablokujearkusza kalkulacyjnego." Dobrze: "nikt mi nie zablokuje arkusza kalkulacyjnego."
+- Źle: "są ludzie, którzybią to bez zadęcia." Dobrze: "są ludzie, którzy tłumaczą to bez zadęcia."
+
+ZAKOŃCZENIE:
+- Zakończ naturalnie i zabawnie.
+- Zaproś do komentarza z pytaniem, problemem z pracy albo dziwną historią z AI.
+- Zaproś na Discorda jako miejsce dla pozytywnych wariatów, którzy próbują ogarnąć AI bez spiny.
+- Nie czytaj linków na głos.
+- Powiedz tylko: "link jest w opisie" albo "linki są w opisie".
+- Nie kończ formalnym podsumowaniem.
+
+PRZYKŁADOWY TON:
+Antoni: "Najdziwniejsze w AI jest to, że człowiek chciał tylko napisać maila, a po pięciu minutach czuje się, jakby zatrudnił bardzo pewnego siebie stażystę."
+
+Zofia: "Takiego, który czasem pomaga, czasem zmyśla, ale zawsze robi to tonem człowieka, który właśnie wrócił ze szkolenia sprzedażowego."
+
+Antoni: "Czyli nie magiczna wyrocznia, tylko pomocnik z ego większym niż budżet na kawę w biurze."
+
+Zofia: "I dlatego testujesz go na jednym zadaniu, a nie od razu oddajesz mu firmę, hasła do banku i opiekę nad psem."
+`;
+
+    const defaultHostPersonalitiesOther = `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- CRITICAL: Use MASCULINE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate masculine grammatical forms, verb endings and adjectives that agree with the male speaker
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+- Tends to see the bright side of everything
+- Sometimes misses subtleties or nuances
+- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- CRITICAL: Use FEMININE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate feminine grammatical forms, verb endings and adjectives that agree with the female speaker
+- Knows everything (or thinks they do)
+- Often corrects or challenges Speaker1
+- Uses condescending language and sighs frequently
+- Points out flaws, problems, and downsides
+- Makes sarcastic comments and eye-rolls
+- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
+
+    const defaultMainPromptGeminiExpressivePolish = `Rules for Polish Gemini expressive TTS:
+- Use natural spoken Polish.
+- No regional dialect. No Silesian. No Highlander/Goral style. No stylized folk speech.
+- Spell out numbers and model versions in Polish words. Do not use digits in spoken lines.
+- Antoni uses masculine Polish forms.
+- Zofia uses feminine Polish forms.
+- Antoni addresses Zofia with feminine forms.
+- Zofia addresses Antoni with masculine forms.
+- Every line should react to the previous one: question, counter, example, joke, callback, clarification.
+- Keep the tone warm, practical, funny, and beginner-friendly.
+- No long lectures.
+- No formal summaries.
+- No corporate language.
+- No reading URLs aloud.
+- Each turn must fit a short video clip. Prefer three to ten seconds of speech per turn.
+- A longer turn is allowed only when it sounds natural and stays under the hard per-turn limit.`;
+
+    const usedPolishEndingPrompt = polishEndingPrompt || adminSettings.polish_ending_prompt || defaultPolishEndingPrompt;
+
+    const defaultHostPersonalitiesPolishGeminiExpressive = `STYLE: natural Polish AI w Biznesie podcast, warm with edge.
+
+Output a natural two-person conversation between Antoni and Zofia.
+Do not use dialect.
+Do not make the structure rigid.
+Use alternating turns.
+The target duration after TTS is about two to three minutes.
+
+PACING FOR VIDEO CLIPS:
+- Each turn must fit comfortably in a short video clip up to fifteen seconds.
+- Most turns should feel like three to ten seconds of speech.
+- Mix very short reactions, normal lines, and occasional longer thoughts.
+- Do not make every line the same length.
+- Soft limit per turn: about two hundred twenty characters.
+- Hard limit per turn: about two hundred forty characters.
+- If a thought gets longer, split it naturally with a reaction from the other host.
+
+GEMINI CUES:
+- Use only allowed cues: [laughing], [sigh], [uhm], [short pause].
+- Use cues sparingly.
+- Do not use cues in every line.
+- Use no other bracketed text.
+
+Antoni:
+- male,
+- curious,
+- energetic,
+- warm,
+- slightly overexcited,
+- asks beginner-friendly questions,
+- turns AI topics into funny everyday images,
+- uses masculine Polish forms.
+
+Zofia:
+- female,
+- sharp,
+- practical,
+- dry humor,
+- corrects hype without being mean,
+- explains things simply,
+- uses feminine Polish forms.
+
+Tone:
+- simple Polish,
+- useful examples,
+- quick jokes,
+- no fake expert vibe,
+- no corporate phrases,
+- no stiff introductions.
+
+The listener should feel:
+"OK, I understand this a little better, and I actually enjoyed listening."`;
+    // Build host personalities section - use provided prompts or defaults
+    let hostPersonalitiesSection = '';
+    if (isPolish) {
+      const defaultPolishHostPrompt = isGeminiExpressive
+        ? defaultHostPersonalitiesPolishGeminiExpressive
+        : defaultHostPersonalitiesPolish;
+      hostPersonalitiesSection = hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish || defaultPolishHostPrompt;
+    } else {
+      const personalitiesPrompt = hostPersonalitiesPromptOther || adminSettings.host_prompt_other || defaultHostPersonalitiesOther;
+      hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
+    }
+
+    const defaultMainPromptForRequest =
+      isPolish && isGeminiExpressive
+        ? defaultMainPromptGeminiExpressivePolish
+        : isPolish && isPlainSpeakableTts
+          ? defaultPolishOmnivoiceMainPrompt
+          : isPolish
+            ? defaultMainPromptPolishNatural
+            : defaultMainPrompt;
+    const effectiveMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPromptForRequest;
+
+    console.log(`[Generate Podcast] Request starting: title="${title || 'Article'}", language="${language}"`);
+    console.log(`[Generate Podcast] Models: ${modelName} via ${provider}`);
+    console.log(`[Generate Podcast] LLM timeout per attempt: ${llmAttemptTimeoutMs}ms`);
+    console.log(`[Generate Podcast] Host Personalities Section starts with: ${hostPersonalitiesSection.substring(0, 50)}...`);
+
+    try {
+      console.log(`[Generate Podcast] Calling LLM with prompt length: ${300 + hostPersonalitiesSection.length + effectiveMainPrompt.length}...`);
+      
+      const ttsGuard = isPlainSpeakableTts
+        ? `CRITICAL TTS RULES (Plain-speech TTS output for ${ttsProvider} — overrides ANY conflicting instruction later in this prompt):
+- Do NOT include emotional annotations like [laughs], [chuckles], [sighs], [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed], [eye roll], [pauses], or any bracketed stage directions.
+- Do NOT use em-dashes (—) to show interruptions. Do not truncate sentences with dashes. Every line must be a complete, self-contained sentence.
+- No non-verbal cues, no action descriptions, no parenthetical asides.
+- Output only clean speakable text a neural TTS will read aloud verbatim.
+
+`
+        : isGeminiExpressive
+          ? `CRITICAL TTS RULES (Gemini expressive-lite output — overrides ANY conflicting instruction later in this prompt):
+- Only these bracketed delivery cues are allowed, and only when genuinely helpful: ${GEMINI_EXPRESSIVE_ALLOWED_TAGS.join(', ')}.
+- Do NOT use any other bracketed annotations such as [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed], [eye roll], [chuckles], [pauses], or similar.
+- Keep the conversation lively and energetic, but the text must remain clean and directly speakable.
+- Use short, punchy lines. Fast reactions are good, but every line must still be a complete spoken utterance.
+- Use bracketed cues sparingly: max one cue in a line, and only in lines that truly benefit from a stronger emotional turn.
+- Prefer cues at the beginning of a sentence or just before the emotional fragment, never stack multiple cues in one utterance.
+- Emotional shape matters more than tag count: the dialogue should feel animated even if many lines contain no cue at all.
+- Antoni may occasionally use [laughing] or [uhm] when he gets overexcited, surprised, or verbally trips over his own hype.
+- Zofia may occasionally use [sigh] or [short pause] when delivering dry sarcasm, dismissal, or a cold skeptical punchline.
+- Never put emotional cues in every line. In a short 7-10 exchange podcast, usually 2-4 total cues across the whole conversation is enough.
+- Do not turn the speakers into cartoon characters. Antoni should sound energized and impulsive; Zofia should sound dry, ironic, and mildly exasperated.
+- ${geminiTempo === 'fast'
+  ? 'Bias toward brisk pacing, tight turn-taking, and minimal dead air.'
+  : 'Bias toward natural conversational pacing with a little momentum.'}
+
+`
+          : isGeminiPlain
+            ? `CRITICAL TTS RULES (Gemini plain output — overrides ANY conflicting instruction later in this prompt):
+- Do NOT include bracketed stage directions or emotional annotations.
+- Keep lines clean, direct, and fully speakable.
+- Avoid em-dash interruptions and avoid unfinished thoughts.
+
+`
+        : '';
+
+      const podcastFormatInstruction = isPolish
+        ? `IMPORTANT — NATURAL PODCAST LENGTH AND VIDEO-SAFE PACING:
+- Target duration after TTS: about two to three minutes.
+- Do not force an exact number of turns.
+- Usually create about eighteen to twenty-six total turns, alternating Antoni and Zofia.
+- Spoken text target: usually around two thousand three hundred to three thousand four hundred characters total, depending on topic density.
+- This is a soft production target, not a rigid template.
+- The conversation must feel human, not measured with a ruler.
+
+VIDEO-SAFE TURN LENGTH:
+- Each single turn must fit comfortably in a short video clip up to fifteen seconds.
+- Most turns should feel like three to ten seconds of speech.
+- Use a natural mix:
+  short reactions,
+  medium explanations,
+  quick jokes,
+  occasional longer thoughts.
+- Soft limit per turn: about two hundred twenty characters.
+- Hard limit per turn: about two hundred forty characters.
+- Do not create long monologues.
+- If a thought needs more space, split it into two turns and let the other speaker react between them.
+- After a longer turn, the next turn should usually be short: reaction, joke, question, or counter.
+- Avoid equal-length robotic lines.
+- Every line must add at least one thing: information, emotion, joke, question, reaction, example, or callback.
+
+MANDATORY CUT-INS:
+- Include four to six standalone short cut-in turns.
+- A cut-in turn is a separate speaker turn with one to seven words and no explanation attached.
+- At least four cut-ins are mandatory.
+- Do not count a longer sentence starting with "No właśnie" or "Czekaj" as a cut-in.
+- Examples that count: "Stop.", "Czekaj.", "O, to ważne.", "Nie tak szybko.", "Dobra, ale po ludzku."
+- Use cut-ins to create human rhythm, not chaos.
+
+MANDATORY ENDING:
+- Do not end after only saying that the listener may feel chaos in their head.
+- The ending must include two or three short final turns.
+- It must include: one warm callback or joke, one invitation to leave a comment, one invitation to Discord, and the phrase "link jest w opisie" or "linki są w opisie".
+- Do not say full URLs.
+- Do not end with only "Pa" or a formal goodbye.`
+        : `IMPORTANT — NATURAL PODCAST LENGTH AND VIDEO-SAFE PACING:
+- Target duration after TTS: about two to three minutes.
+- Do not force an exact number of turns.
+- Keep every turn short enough for a video clip up to fifteen seconds.
+- Mix short reactions, medium explanations, quick jokes, and occasional longer thoughts.
+- Avoid long monologues and robotic equal-length lines.
+- Every line must add information, emotion, joke, question, reaction, example, or callback.`;
+
+      const prompt = `${ttsGuard}${podcastFormatInstruction}
+
+Create a highly dynamic, natural podcast conversation in ${languageName} between Antoni and Zofia based on the provided content.
+
+Title: ${title || "Article"}
+Content: ${rawText}
+
+${hostPersonalitiesSection}
+${effectiveMainPrompt || ''}
+
+${isPolish ? usedPolishEndingPrompt : ''}`;
+
+      let finalObject: PodcastGenerationResult | null = null;
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= GENERATE_PODCAST_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          console.log(
+            `[Generate Podcast] LLM attempt ${attempt}/${GENERATE_PODCAST_MAX_ATTEMPTS}`
+          );
+
+          const result = await generateObject({
+            model,
+            schema: podcastSchema,
+            prompt,
+            maxRetries: 0,
+            abortSignal: AbortSignal.timeout(llmAttemptTimeoutMs),
+            experimental_repairText: async ({ text }) => extractJsonCandidate(text),
+          });
+
+          const normalizedConversation = normalizeConversationDraft(
+            result.object?.conversation
+          );
+
+          if (normalizedConversation.length === 0) {
+            throw new Error("Generated conversation was empty.");
+          }
+
+          const postProcessedConversation = splitLeadingCutIns(normalizedConversation);
+
+          finalObject = {
+            conversation: postProcessedConversation.map((item) => ({
+              speaker: item.speaker as PodcastSpeaker,
+              text: cleanGeneratedPodcastText(item.text),
+            })),
+          };
+          break;
+        } catch (error) {
+          lastError = error;
+          const retryable = isRetryablePodcastGenerationError(error);
+          console.warn(
+            `[Generate Podcast] LLM attempt ${attempt}/${GENERATE_PODCAST_MAX_ATTEMPTS} failed: ${getNestedErrorMessage(
+              error
+            )}`
+          );
+
+          if (!retryable || attempt === GENERATE_PODCAST_MAX_ATTEMPTS) {
+            throw error;
+          }
+        }
+      }
+
+      if (!finalObject) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error("Failed to generate podcast conversation.");
+      }
+
+      return createTextStreamResponse([
+        {
+          type: "partial",
+          data: finalObject,
+        },
+        {
+          type: "complete",
+          data: finalObject,
+        },
+      ]);
+    } catch (apiError: unknown) {
+      console.error("API error:", apiError);
+
+      // Check for specific error types
+      let errorMessage = 'Failed to generate podcast conversation';
+      const providerError = extractProviderError(apiError);
+
+      if (providerError.code === 'insufficient_quota') {
+        errorMessage = `${provider} API quota exceeded. Please check your billing and plan details.`;
+      } else if (providerError.code === 'invalid_api_key') {
+        errorMessage = `Invalid ${provider} API key. Please check your API key configuration.`;
+      } else if (providerError.message) {
+        errorMessage = providerError.code
+          ? `${provider} API error: ${providerError.message}`
+          : `Error: ${providerError.message}`;
+      }
+
+      return createErrorStreamResponse(errorMessage);
+    }
+  } catch (error) {
+    console.error("Error generating podcast:", error);
+    return NextResponse.json(
+      { error: "Failed to generate podcast conversation" },
+      { status: 500 }
+    );
+  }
+}

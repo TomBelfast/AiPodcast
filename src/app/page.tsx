@@ -99,7 +99,7 @@ const saveSettings = (settings: Partial<Settings>) => {
 
 // Default prompt templates
 const getDefaultPrompts = () => ({
-  mainPrompt: `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, and measurements as full words in the conversation text. This is essential for proper text-to-speech conversion.
+  mainPrompt: `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, measurements, version numbers, and decimals as full words in the conversation text. This is essential for proper text-to-speech conversion.
 
 Examples for English:
 - "5" → "five"
@@ -110,6 +110,8 @@ Examples for English:
 - "2024" → "two thousand twenty-four"
 - "50%" → "fifty percent"
 - "$100" → "one hundred dollars"
+- "4.8" → "four point eight"
+- "3.5" → "three point five"
 
 Examples for Polish:
 - "5" → "pięć"
@@ -119,8 +121,10 @@ Examples for Polish:
 - "1000" → "tysiąc"
 - "2024" → "dwa tysiące dwadzieścia cztery"
 - "50%" → "pięćdziesiąt procent"
+- "4.8" → "cztery przecinek osiem"
+- "3.5" → "trzy przecinek pięć"
 
-Never use digits (0-9), numeric symbols, or abbreviations in the conversation text. Always spell out numbers completely as words in the target language.
+Never use digits (0-9), numeric symbols, decimal points, or abbreviations for numbers in the conversation text. Always spell out numbers completely as words in the target language. This includes model version numbers (e.g., write "cztery przecinek osiem" instead of "4.8").
 
 CRITICAL: Make this conversation feel REAL and DYNAMIC with these specific patterns:
 

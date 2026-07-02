@@ -1,0 +1,720 @@
+import { NextRequest, NextResponse } from "next/server";
+import { generateObject } from "ai";
+import { createOpenAI, type OpenAIProviderSettings } from "@ai-sdk/openai";
+import { z } from "zod";
+import {
+  collectCandidateObjects,
+  findNestedObject,
+  isPlainObject,
+  normalizeConversationDraft,
+  normalizeGeminiStyle,
+  normalizeGeminiTempo,
+  normalizeTtsProvider,
+  pickNumber,
+  pickString,
+} from "@/lib/podcast/contracts";
+import { supabase } from "@/lib/supabase";
+
+const GENERATE_PODCAST_TIMEOUT_MS = 150_000;
+const GENERATE_PODCAST_MAX_ATTEMPTS = 3;
+const GENERATE_PODCAST_MIN_TIMEOUT_MS = 30_000;
+const GENERATE_PODCAST_MAX_TIMEOUT_MS = 180_000;
+
+type PodcastSpeaker = "Speaker1" | "Speaker2" | "Antoni" | "Zofia";
+type PodcastGenerationResult = {
+  conversation: Array<{
+    speaker: PodcastSpeaker;
+    text: string;
+  }>;
+};
+
+const GEMINI_EXPRESSIVE_ALLOWED_TAGS = ['[laughing]', '[sigh]', '[uhm]', '[short pause]'] as const;
+
+function extractProviderError(error: unknown): { code?: string; message?: string } {
+  const directMessage = isPlainObject(error) && typeof error.message === 'string'
+    ? error.message
+    : undefined;
+  const cause = isPlainObject(error) ? error.cause : undefined;
+  const nestedError = isPlainObject(cause) ? cause.error : undefined;
+
+  if (!isPlainObject(nestedError)) {
+    return { message: directMessage };
+  }
+
+  return {
+    code: typeof nestedError.code === 'string' ? nestedError.code : undefined,
+    message: typeof nestedError.message === 'string' ? nestedError.message : directMessage,
+  };
+}
+
+function createTextStreamResponse(chunks: Array<Record<string, unknown>>) {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+        }
+        controller.close();
+      },
+    }),
+    {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+      },
+    }
+  );
+}
+
+function createErrorStreamResponse(errorMessage: string) {
+  return createTextStreamResponse([
+    {
+      type: "error",
+      error: errorMessage,
+    },
+  ]);
+}
+
+function extractJsonCandidate(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withoutFence = trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+
+  if (
+    (withoutFence.startsWith("{") && withoutFence.endsWith("}")) ||
+    (withoutFence.startsWith("[") && withoutFence.endsWith("]"))
+  ) {
+    return withoutFence;
+  }
+
+  const firstBrace = withoutFence.indexOf("{");
+  const lastBrace = withoutFence.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return withoutFence.slice(firstBrace, lastBrace + 1);
+  }
+
+  return null;
+}
+
+function getNestedErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const details = [error.message];
+  const nestedCause =
+    typeof (error as Error & { cause?: unknown }).cause === "object"
+      ? (error as Error & { cause?: { message?: unknown } }).cause
+      : null;
+
+  if (nestedCause?.message) {
+    details.push(String(nestedCause.message));
+  }
+
+  return details.join(" | ");
+}
+
+function isRetryablePodcastGenerationError(error: unknown): boolean {
+  const message = getNestedErrorMessage(error).toLowerCase();
+  const name =
+    error instanceof Error
+      ? String((error as Error & { name?: string }).name || "").toLowerCase()
+      : "";
+
+  return (
+    name.includes("noobjectgenerated") ||
+    message.includes("no object generated") ||
+    message.includes("could not parse the response") ||
+    message.includes("unexpected end of json input") ||
+    message.includes("empty response body") ||
+    message.includes("generated conversation was empty") ||
+    message.includes("aborted") ||
+    message.includes("timeout")
+  );
+}
+
+function clampGeneratePodcastTimeoutMs(value: number | null): number {
+  if (!value || !Number.isFinite(value)) {
+    return GENERATE_PODCAST_TIMEOUT_MS;
+  }
+
+  return Math.max(
+    GENERATE_PODCAST_MIN_TIMEOUT_MS,
+    Math.min(Math.round(value), GENERATE_PODCAST_MAX_TIMEOUT_MS)
+  );
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const parsedBody = await req.json();
+    if (!isPlainObject(parsedBody)) {
+      return NextResponse.json(
+        { error: "Request body must be a JSON object" },
+        { status: 400 }
+      );
+    }
+
+    const body = parsedBody as Record<string, unknown>;
+    const candidates = collectCandidateObjects(body);
+    const ttsCandidates = [
+      ...candidates,
+      ...candidates
+        .map((candidate) => findNestedObject(candidate, 'tts'))
+        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate)),
+    ];
+    const llmCandidates = candidates
+      .map((candidate) => findNestedObject(candidate, 'llm'))
+      .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate));
+
+    const rawText = pickString(candidates, [
+      'raw_text',
+      'rawText',
+      'content',
+      'script_text',
+      'scriptText',
+      'transcript',
+      'text',
+      'prompt',
+      'description',
+    ]);
+    const title = pickString(candidates, ['title', 'name']) || undefined;
+    const language = pickString(candidates, ['language', 'lang', 'locale']) || 'en';
+    const mainPrompt = pickString(candidates, ['mainPrompt', 'main_prompt']) || undefined;
+    const polishEndingPrompt =
+      pickString(candidates, ['polishEndingPrompt', 'polish_ending_prompt']) || undefined;
+    const hostPersonalitiesPromptPolish =
+      pickString(candidates, ['hostPersonalitiesPromptPolish', 'host_personalities_prompt_polish']) ||
+      undefined;
+    const hostPersonalitiesPromptOther =
+      pickString(candidates, ['hostPersonalitiesPromptOther', 'host_personalities_prompt_other']) ||
+      undefined;
+    const modelNameOverride =
+      pickString(llmCandidates, ['model']) ||
+      pickString(candidates, ['model', 'openrouter_model', 'openrouterModel']) ||
+      undefined;
+    const llmAttemptTimeoutMs = clampGeneratePodcastTimeoutMs(
+      pickNumber(llmCandidates, ['timeout_ms', 'timeoutMs']) ||
+      pickNumber(candidates, ['timeout_ms', 'timeoutMs', 'llm_timeout_ms', 'llmTimeoutMs'])
+    );
+    const userOpenRouterApiKey =
+      pickString(candidates, ['openrouterApiKey', 'openrouter_api_key', 'openaiApiKey']) ||
+      undefined;
+    const ttsProvider = normalizeTtsProvider(
+      pickString(ttsCandidates, ['provider', 'ttsProvider', 'tts_provider', 'ttsEngine', 'tts_engine']) ||
+        'elevenlabs'
+    );
+    const geminiStyle = normalizeGeminiStyle(
+      pickString(ttsCandidates, ['geminiStyle', 'gemini_style']) || body.geminiStyle
+    );
+    const geminiTempo = normalizeGeminiTempo(
+      pickString(ttsCandidates, ['geminiTempo', 'gemini_tempo']) || body.geminiTempo
+    );
+    const inputConversation = normalizeConversationDraft(body.conversation);
+
+    if (inputConversation.length > 0) {
+      return NextResponse.json(
+        { error: "This endpoint only accepts raw_text and generates a conversation draft." },
+        { status: 400 }
+      );
+    }
+
+    const isPlainSpeakableTts = ttsProvider === 'omnivoice';
+    const isGeminiExpressive = ttsProvider === 'gemini' && geminiStyle === 'expressive-lite';
+    const isGeminiPlain = ttsProvider === 'gemini' && geminiStyle === 'plain';
+
+    const podcastSchema = z.object({
+      conversation: z
+        .array(
+          z.object({
+            speaker: z.enum(["Speaker1", "Speaker2", "Antoni", "Zofia"]),
+            text: z
+              .string()
+              .describe(
+                isPlainSpeakableTts
+                  ? "The text spoken by this speaker. Plain speakable sentences only. No bracketed stage directions, no emotional annotations, no em-dash interruptions, no non-verbal cues."
+                  : isGeminiExpressive
+                    ? `The text spoken by this speaker. Clean spoken text with only Gemini-safe cues from this list: ${GEMINI_EXPRESSIVE_ALLOWED_TAGS.join(', ')}. Use exactly 2-4 cues across the full conversation and no other bracketed annotations.`
+                    : "The text spoken by this speaker, including natural speech patterns and nuances like [laughs], [pauses], [excited], etc."
+              ),
+          })
+        )
+        .describe(
+          "A natural podcast conversation between two speakers discussing the content"
+        ),
+    });
+
+    if (!rawText) {
+      return NextResponse.json(
+        { error: "raw_text is required" },
+        { status: 400 }
+      );
+    }
+
+    // Verify user identity
+    const authHeader = req.headers.get('Authorization');
+    const token = authHeader?.split(' ')[1];
+
+    let userEmail = '';
+
+    if (token) {
+      const { data: { user }, error } = await supabase.auth.getUser(token);
+      if (!error && user?.email) {
+        userEmail = user.email;
+      }
+    }
+
+    const isAdmin = userEmail === 'tomaszpasiekauk@gmail.com';
+
+    // Access Control Logic
+
+    // 3. Get Admin Fallback Settings
+    const { getEffectiveAdminSettings } = await import("@/lib/admin-settings");
+    const adminSettings = getEffectiveAdminSettings();
+
+    // Determine final key to use
+    // 1. Prioritize user key from request (if any)
+    // 2. Fall back to admin settings if user is admin OR if this is a session-less request (webhook)
+    let apiKey = userOpenRouterApiKey;
+    if (!apiKey && (isAdmin || !authHeader)) {
+      apiKey = String(
+        process.env.OPENROUTER_API_KEY ||
+        adminSettings.openai_api_key ||
+        ''
+      ).trim();
+    }
+
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          error: "Please complete your OpenRouter API Key in Settings",
+          code: "MISSING_OPENROUTER_KEY"
+        },
+        { status: 403 }
+      );
+    }
+
+    const envOpenRouterKey = String(process.env.OPENROUTER_API_KEY || '').trim();
+    if (!String(apiKey).startsWith('sk-or-')) {
+      if (envOpenRouterKey) {
+        apiKey = envOpenRouterKey;
+      } else {
+        return NextResponse.json(
+          {
+            error: "This endpoint now requires an OpenRouter API key.",
+            code: "INVALID_OPENROUTER_KEY",
+          },
+          { status: 403 }
+        );
+      }
+    }
+
+    const provider = 'OpenRouter';
+    const openaiClient = createOpenAI({
+      apiKey,
+      baseURL: 'https://openrouter.ai/api/v1',
+    } satisfies OpenAIProviderSettings);
+
+    const modelName = modelNameOverride || process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
+
+    const model = openaiClient(modelName);
+
+    // Determine language name
+    const languageNames: Record<string, string> = {
+      en: 'English',
+      pl: 'Polish',
+      es: 'Spanish',
+      fr: 'French',
+      de: 'German',
+      it: 'Italian',
+      pt: 'Portuguese',
+      ru: 'Russian',
+      ja: 'Japanese',
+      ko: 'Korean',
+      zh: 'Chinese',
+    };
+    const languageName = languageNames[language] || 'English';
+    const isPolish = language === 'pl';
+
+    // Use prompts from request or fallback to defaults
+    const defaultMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS: Always write all numbers, percentages, years, quantities, measurements, version numbers, and decimals as full words in the conversation text. This is essential for proper text-to-speech conversion.
+
+Examples for English:
+- "5" → "five"
+- "23" → "twenty-three"  
+- "100" → "one hundred"
+- "250" → "two hundred fifty"
+- "1000" → "one thousand"
+- "2024" → "two thousand twenty-four"
+- "50%" → "fifty percent"
+- "$100" → "one hundred dollars"
+- "4.8" → "four point eight"
+- "3.5" → "three point five"
+
+Examples for Polish:
+- "5" → "pięć"
+- "23" → "dwadzieścia trzy"
+- "100" → "sto"
+- "250" → "dwieście pięćdziesiąt"
+- "1000" → "tysiąc"
+- "2024" → "dwa tysiące dwadzieścia cztery"
+- "50%" → "pięćdziesiąt procent"
+- "4.8" → "cztery przecinek osiem"
+- "3.5" → "trzy przecinek pięć"
+
+Never use digits (0-9), numeric symbols, decimal points, or abbreviations for numbers in the conversation text. Always spell out numbers completely as words in the target language. This includes model version numbers (e.g., write "cztery przecinek osiem" instead of "4.8").
+
+CRITICAL: Make this conversation feel REAL and DYNAMIC with these specific patterns:
+
+INTERRUPTION PATTERNS:
+- Use "—" (em dash) to show mid-sentence interruptions: "So I was thinking we could—" / "—test our new timing features?"
+- Show speakers cutting each other off naturally
+- Include overlapping thoughts and competing to speak
+
+EMOTIONAL REACTIONS:
+- Frequent emotional annotations: [laughs], [chuckles], [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed]
+- Show genuine reactions to what the other person says
+- Include moments of realization, surprise, disagreement
+
+CONVERSATIONAL FLOW:
+- Speakers should interrupt, agree enthusiastically, or disagree
+- Include side tangents and references to other topics
+- Show speakers building on each other's ideas or challenging them
+- Use casual language, contractions, and natural speech patterns
+- Include filler words and natural hesitations occasionally
+
+DYNAMIC EXCHANGES:
+- Mix very short responses ("Wait, what?", "Exactly!", "Oh my god!") with longer explanations
+- Show speakers getting excited and talking over each other
+- Include moments where they both try to talk at the same time
+- Reference shared knowledge or experiences they might have
+
+EXAMPLE PERSONALITY INTERACTIONS:
+- Speaker1: "Oh my god, this is incredible! So you're telling me—"
+- Speaker2: "—[sighs] Obviously you missed the part where it says this barely works in practice."
+- Speaker1: "Wait, but couldn't this change everything?!"
+- Speaker2: "Sure, if you ignore all the obvious problems it creates. [eye roll]"
+- Speaker1: "I'm so excited about this! What do you think?"
+- Speaker2: "I think you're getting way too worked up over something that's been tried before and failed."
+
+Make Speaker1 genuinely enthusiastic and sometimes adorably clueless, while Speaker2 is constantly deflating their excitement with cold realism and superiority. 
+
+GRAMMATICAL ACCURACY - CRITICAL FOR GENDER-INFLECTED LANGUAGES:
+- Speaker1 (MALE) must use MASCULINE grammatical forms in languages with gender inflection (Polish, Russian, Spanish, French, German, etc.)
+- Speaker2 (FEMALE) must use FEMININE grammatical forms in languages with gender inflection
+- For POLISH specifically:
+  * Speaker1 (male): "byłem", "zrobiłem", "pomyślałem", "widziałem", "rozumiem", "powiedziałem", "dowiedziałem się"
+  * Speaker2 (female): "byłam", "zrobiłam", "pomyślałam", "widziałam", "rozumiem", "powiedziałam", "dowiedziałam się"
+  * Use proper masculine/feminine verb endings in past tense and other gender-agreeing forms
+- For other gender-inflected languages: Apply the same principle - use correct masculine forms for Speaker1 and feminine forms for Speaker2
+- This includes verb conjugations, past participles, adjectives, and all grammatical elements that must agree with the speaker's gender
+- In English: Gender agreement is less strict, but maintain natural gender-appropriate language
+
+SYNTAX AND GRAMMATICAL CORRECTNESS:
+- CRITICAL: All sentences must use correct grammar and syntax for the target language
+- Avoid grammatical errors, incorrect word forms, or awkward phrasing
+- For POLISH: Pay special attention to:
+  * Correct case endings (mianownik, dopełniacz, celownik, biernik, narzędnik, miejscownik, wołacz)
+  * Proper verb forms and conjugations
+  * Correct noun-adjective agreement
+  * Proper use of prepositions with correct cases
+  * Examples of CORRECT Polish: "polewanie zimną wodą", "działanie pod presją", "reakcja na stres"
+  * Examples of INCORRECT to avoid: "lanie pod zimną wodę" (should be "polewanie zimną wodą"), "działanie pod presje" (should be "działanie pod presją")
+- Use natural, idiomatic expressions that sound natural to native speakers
+- Double-check that all noun phrases, verb phrases, and sentence structures follow the rules of the target language
+- If unsure about grammar, use simpler but correct constructions rather than complex but incorrect ones`;
+
+    // Slim main prompt for the Polish + omnivoice path. The full `defaultMainPrompt`
+    // contains English Speaker1/2 examples, em-dash interruptions and bracketed cues
+    // ([laughs], [sighs]) that directly contradict the omnivoice TTS guard, which leads
+    // some models to inflate lines and ignore length rules. Keep only the parts that
+    // do NOT conflict: numbers-as-words and Polish gender/case grammar.
+    const defaultPolishOmnivoiceMainPrompt = `CRITICAL - NUMBERS MUST BE WRITTEN AS WORDS in the Polish conversation. Spell out all numbers, percentages, years, quantities, version numbers, and decimals. Examples: "5" → "pięć", "23" → "dwadzieścia trzy", "100" → "sto", "250" → "dwieście pięćdziesiąt", "1000" → "tysiąc", "2024" → "dwa tysiące dwadzieścia cztery", "50%" → "pięćdziesiąt procent", "4.8" → "cztery przecinek osiem", "3.5" → "trzy przecinek pięć". Never use digits (0-9), decimal points, or numeric symbols anywhere in the conversation. This includes model version numbers (e.g., write "cztery przecinek osiem" instead of "4.8").
+
+GRAMMATICAL ACCURACY (Polish gender inflection):
+- Antoni (male): MASCULINE past-tense forms — "byłem", "zrobiłem", "pomyślałem", "widziałem", "powiedziałem".
+- Zofia (female): FEMININE past-tense forms — "byłam", "zrobiłam", "pomyślałam", "widziałam", "powiedziałam".
+- When Antoni addresses Zofia in 2nd person past tense: FEMININE — "słyszałaś", "widziałaś", "musiałaś", "czytałaś" (NOT "słyszałeś"/"musiałeś"). This includes dialect forms — use "czytałaś"/"widziołaś" not "czytołeś"/"widziołeś".
+- When Zofia addresses Antoni in 2nd person past tense: MASCULINE — "słyszałeś", "widziałeś", "musiałeś", "kiebyś pomyślał", "wiedzioł".
+
+SYNTAX AND GRAMMATICAL CORRECTNESS (Polish):
+- Correct case endings (mianownik, dopełniacz, celownik, biernik, narzędnik, miejscownik, wołacz).
+- Proper verb conjugations, noun-adjective agreement, correct prepositions with the right case.
+- Examples: "polewanie zimną wodą" (NIE "lanie pod zimną wodę"), "działanie pod presją" (NIE "działanie pod presje").
+- Use punctuation: commas between clauses, periods at sentence ends. Do NOT drop commas to save characters.
+- Natural, idiomatic Polish; if unsure, prefer simpler but correct constructions.`;
+
+    const defaultPolishEndingPrompt = ``;
+
+    const defaultHostPersonalitiesPolish = `TOP PRIORITY — STYL ROGANA (JAK W JOE ROGAN PODCAST):
+Dialog MUSI być dynamiczny i szybki jak w najlepszych odcinkach Rogana z ciężkim
+polskim humorem. NIE jest to suchy komentarz newsowy. To pyskówka dwojga
+kolegów w pubie.
+
+TWARDE ZASADY DŁUGOŚCI (cel: podcast ~2 minuty):
+- DOKŁADNIE 10 wymian (5 Antoni + 5 Zofia). Nie 8, nie 9. 10.
+- KAŻDA kwestia: 150-200 znaków (TWARDY górny limit 200, NIGDY 210+). POD 150 = porażka (dopakuj reakcję, pointę).
+- Łącznie cały dialog 1700-2000 znaków (target ~1850).
+- Dialog dynamiczny, "ping-pong": energia, reakcja, energia, reakcja.
+
+PRIORYTET TREŚCI (gdy konkurują, wybieraj tak):
+1) ENERGIA I AUTENTYCZNOŚĆ (każda kwestia musi tryskać życiem)
+2) KONKRETNA HISTORIA / PRZYKŁAD z życia (nie abstrakcja)
+3) POINTA lub ODKRYCIE (aha-moment, zaskoczenie)
+
+Antoni (Male - Energetic & Enthusiastic):
+- Skrajnie entuzjastyczny, szczery, bezpośredni.
+- MASCULINE grammatical forms: "byłem", "zrobiłem", "widziałem".
+- Brak dialektu — żywy, colloquial polski.
+- Signature: "Słuchaj—", "No właśnie!", "Czekaj, czekaj!", "Serio?!", "O matko!", "I wiesz co?".
+- Opowiada konkretne historyjki z życia, wyciąga wnioski, zadaje pytania.
+- Emocja: ma brzmieć jak gość przy kawie który właśnie odkrył coś genialnego i nie może się powstrzymać.
+
+Zofia (Female - Equally Energetic & Sharp):
+- Równie energetyczna, skupiona, buduje na energii Antoniego.
+- FEMININE grammatical forms: "byłam", "zrobiłam", "widziałam".
+- Brak dialektu.
+- Signature: "Dokładnie!", "I właśnie to!", "Ale moment—", "No i?!", "To jest to!", "A wiesz dlaczego?".
+- Nie zbija entuzjazmu — potęguje go, precyzuje, dodaje swój kąt.
+- Emocja: ma brzmieć jak ktoś kto też się tym jarał i czekał żeby wreszcie o tym pogadać.
+
+PRZYKŁAD WZORCOWEJ WYMIANY HYPECHAT-STYLE (naśladuj tempo, długość ~170 zn, nie słowa):
+Antoni: "Słuchaj, wczoraj to po prostu kliknęło — wstałem godzinę wcześniej, bez telefonu, i wieczorem byłem mniej zmęczony niż zwykle. Jedna mała zmiana, a czułem się jak inny człowiek." (193 zn)
+Zofia: "No właśnie to! Bo to nie jest kwestia siły woli — tylko środowiska. Zmień środowisko, zmienisz zachowanie. Proste, a działa lepiej niż jakakolwiek motywacja z YouTube." (172 zn)
+Antoni: "A ja przez rok myślałem że po prostu jestem leniwy! Że coś ze mną nie tak! A to był tylko telefon przy łóżku i głupie nawyki które wciągały mnie w złe rytmy od rana." (174 zn)
+Zofia: "I to jest właśnie ta różnica — między wiedzą a działaniem. Wszyscy wiemy że telefon szkodzi. Ale dopóki leży przy łóżku, dopóty mózg sięga po niego zanim się obudzi." (173 zn)
+Antoni: "Więc co zrobiłaś? Bo ja po prostu przestałem wnosić go do sypialni i — serio — trzy tygodnie i już nie tęsknię. Nie rozumiem dlaczego nie zrobiłem tego wcześniej!" (171 zn)
+
+Zauważ: krótko ale GĘSTO. Każda kwestia = konkret + energia + reakcja.
+Nie wolno: "Pierona, jakieś cuda!" (43 zn) — za krótkie, brak treści. Rogan by się obraził.`;
+
+    const defaultHostPersonalitiesOther = `HOST PERSONALITIES:
+Speaker1 (Male - Energetic & Naive):
+- MALE speaker with an extremely enthusiastic and optimistic personality
+- CRITICAL: Use MASCULINE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate masculine grammatical forms, verb endings and adjectives that agree with the male speaker
+- Easily excited by new concepts and ideas
+- Asks lots of questions, sometimes obvious ones
+- Uses exclamation points frequently and energetic language
+- Tends to see the bright side of everything
+- Sometimes misses subtleties or nuances
+- Quick to get excited: "Oh wow!", "That's amazing!", "I had no idea!"
+
+Speaker2 (Female - Pessimistic & Arrogant):
+- FEMALE speaker who is skeptical and cynical about most claims
+- CRITICAL: Use FEMININE grammatical forms in {LANGUAGE} (for languages with gender inflection)
+  * Use appropriate feminine grammatical forms, verb endings and adjectives that agree with the female speaker
+- Knows everything (or thinks they do)
+- Often corrects or challenges Speaker1
+- Uses condescending language and sighs frequently
+- Points out flaws, problems, and downsides
+- Makes sarcastic comments and eye-rolls
+- Tends to be contrarian: "Actually...", "Well, obviously...", "That's not quite right..."`;
+
+    const defaultMainPromptGeminiExpressivePolish = `Rules for Polish Gemini TTS:
+- Spell out all numbers, version numbers, and decimals in words (e.g., "cztery przecinek osiem" instead of "4.8"); no digits or code-like notation.
+- Make every line react to the previous one: fact, joke, counter, callback.
+- No long explanations, summaries, moralizing, or em dash interruptions.
+- Antoni uses masculine Polish forms; Zofia uses feminine forms.
+- Antoni addresses Zofia with feminine forms; Zofia addresses Antoni with masculine forms.
+- Strong dialect flavor, but still understandable.`;
+
+    const usedPolishEndingPrompt = polishEndingPrompt || adminSettings.polish_ending_prompt || defaultPolishEndingPrompt;
+
+    const defaultHostPersonalitiesPolishGeminiExpressive = `STYLE: expressive_cues_16, hypechat, szybkie riposty, czysta energia.
+
+Output exactly 16 alternating turns: Antoni, Zofia, Antoni, Zofia.
+Each turn max 120 characters; target 40-70. At least 4 turns are 2-7 words.
+Use exactly 4 total cues from: [laughing], [sigh], [uhm], [short pause].
+Use at least 4 questions. No other bracketed text.
+
+Antoni: male, energetic, enthusiastic, no dialect. Phrases: "Słuchaj—", "No właśnie!", "Serio?!", "Ale moment!", "O, to jest to!", "Czekaj czekaj—", "I wiesz co?".
+Zofia: female, equally energetic, builds on Antoni. Phrases: "Dokładnie!", "I właśnie to!", "Ale poczekaj—", "No i?!", "To jest to!", "A wiesz dlaczego?".
+
+Both speakers feed each other — no sarcasm, pure positive energy, like two friends who just discovered something amazing.
+
+Rhythm example:
+Antoni: "[laughing] Słuchaj, wczoraj spróbowałem i to po prostu działa — sam nie wierzę!"
+Zofia: "Serio?! Mów dalej!"
+Antoni: "Zrobiłem to w piętnaście minut, co wcześniej zajmowało mi cały dzień."
+Zofia: "No właśnie to! I ludzie dalej się zastanawiają czy warto spróbować."`;
+    // Build host personalities section - use provided prompts or defaults
+    let hostPersonalitiesSection = '';
+    if (isPolish) {
+      const defaultPolishHostPrompt = isGeminiExpressive
+        ? defaultHostPersonalitiesPolishGeminiExpressive
+        : defaultHostPersonalitiesPolish;
+      hostPersonalitiesSection = hostPersonalitiesPromptPolish || adminSettings.host_prompt_polish || defaultPolishHostPrompt;
+    } else {
+      const personalitiesPrompt = hostPersonalitiesPromptOther || adminSettings.host_prompt_other || defaultHostPersonalitiesOther;
+      hostPersonalitiesSection = personalitiesPrompt.replace(/{LANGUAGE}/g, languageName);
+    }
+
+    const defaultMainPromptForRequest =
+      isPolish && isGeminiExpressive
+        ? defaultMainPromptGeminiExpressivePolish
+        : isPolish && isPlainSpeakableTts
+          ? defaultPolishOmnivoiceMainPrompt
+          : defaultMainPrompt;
+    const effectiveMainPrompt = mainPrompt || adminSettings.main_prompt || defaultMainPromptForRequest;
+
+    console.log(`[Generate Podcast] Request starting: title="${title || 'Article'}", language="${language}"`);
+    console.log(`[Generate Podcast] Models: ${modelName} via ${provider}`);
+    console.log(`[Generate Podcast] LLM timeout per attempt: ${llmAttemptTimeoutMs}ms`);
+    console.log(`[Generate Podcast] Host Personalities Section starts with: ${hostPersonalitiesSection.substring(0, 50)}...`);
+
+    try {
+      console.log(`[Generate Podcast] Calling LLM with prompt length: ${300 + hostPersonalitiesSection.length + effectiveMainPrompt.length}...`);
+      
+      const ttsGuard = isPlainSpeakableTts
+        ? `CRITICAL TTS RULES (Plain-speech TTS output for ${ttsProvider} — overrides ANY conflicting instruction later in this prompt):
+- Do NOT include emotional annotations like [laughs], [chuckles], [sighs], [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed], [eye roll], [pauses], or any bracketed stage directions.
+- Do NOT use em-dashes (—) to show interruptions. Do not truncate sentences with dashes. Every line must be a complete, self-contained sentence.
+- No non-verbal cues, no action descriptions, no parenthetical asides.
+- Output only clean speakable text a neural TTS will read aloud verbatim.
+
+`
+        : isGeminiExpressive
+          ? `CRITICAL TTS RULES (Gemini expressive-lite output — overrides ANY conflicting instruction later in this prompt):
+- Only these bracketed delivery cues are allowed, and only when genuinely helpful: ${GEMINI_EXPRESSIVE_ALLOWED_TAGS.join(', ')}.
+- Do NOT use any other bracketed annotations such as [excited], [surprised], [skeptical], [thoughtful], [confused], [amazed], [eye roll], [chuckles], [pauses], or similar.
+- Keep the conversation lively and energetic, but the text must remain clean and directly speakable.
+- Use short, punchy lines. Fast reactions are good, but every line must still be a complete spoken utterance.
+- Use bracketed cues sparingly: max one cue in a line, and only in lines that truly benefit from a stronger emotional turn.
+- Prefer cues at the beginning of a sentence or just before the emotional fragment, never stack multiple cues in one utterance.
+- Emotional shape matters more than tag count: the dialogue should feel animated even if many lines contain no cue at all.
+- Antoni may occasionally use [laughing] or [uhm] when he gets overexcited, surprised, or verbally trips over his own hype.
+- Zofia may occasionally use [sigh] or [short pause] when delivering dry sarcasm, dismissal, or a cold skeptical punchline.
+- Never put emotional cues in every line. In a short 7-10 exchange podcast, usually 2-4 total cues across the whole conversation is enough.
+- Do not turn the speakers into cartoon characters. Antoni should sound energized and impulsive; Zofia should sound dry, ironic, and mildly exasperated.
+- ${geminiTempo === 'fast'
+  ? 'Bias toward brisk pacing, tight turn-taking, and minimal dead air.'
+  : 'Bias toward natural conversational pacing with a little momentum.'}
+
+`
+          : isGeminiPlain
+            ? `CRITICAL TTS RULES (Gemini plain output — overrides ANY conflicting instruction later in this prompt):
+- Do NOT include bracketed stage directions or emotional annotations.
+- Keep lines clean, direct, and fully speakable.
+- Avoid em-dash interruptions and avoid unfinished thoughts.
+
+`
+        : '';
+
+      const podcastFormatInstruction = isPolish && isGeminiExpressive
+        ? `IMPORTANT: Make this a fast Silesian-Goral Gemini expressive-lite podcast. Use EXACTLY 16 short alternating turns: Antoni, Zofia, Antoni, Zofia. Aim for 650-950 characters total. Keep it snappy, reactive, funny, and directly speakable.`
+        : `IMPORTANT — HARD LENGTH RULES (consistent with host-personality section below; if anything conflicts later, THESE win):
+- EXACTLY 10 exchanges (5 Antoni + 5 Zofia, alternating, starting with Antoni).
+- TOTAL conversation length: 1700–2000 characters (target ~1850). Below 1700 is a FAILURE. Above 2000 is a FAILURE.
+- EVERY single line: 150–200 characters (HARD upper bound 200, NEVER 210+). Lines below 150 chars are a FAILURE — pack in a follow-up, a callback, or a sharper punchline. Lines above 200 are a FAILURE — trim filler.
+- Podcast target duration after TTS: 2 minutes. Short stubs (<150 chars) collapse to <1 min and ruin the format.`;
+
+      const prompt = `${ttsGuard}${podcastFormatInstruction}
+
+Create a highly dynamic, natural podcast conversation in ${languageName} between Antoni and Zofia based on the provided content.
+
+Title: ${title || "Article"}
+Content: ${rawText}
+
+${hostPersonalitiesSection}
+${effectiveMainPrompt || ''}
+
+${isPolish ? usedPolishEndingPrompt : ''}`;
+
+      let finalObject: PodcastGenerationResult | null = null;
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= GENERATE_PODCAST_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          console.log(
+            `[Generate Podcast] LLM attempt ${attempt}/${GENERATE_PODCAST_MAX_ATTEMPTS}`
+          );
+
+          const result = await generateObject({
+            model,
+            schema: podcastSchema,
+            prompt,
+            maxRetries: 0,
+            abortSignal: AbortSignal.timeout(llmAttemptTimeoutMs),
+            experimental_repairText: async ({ text }) => extractJsonCandidate(text),
+          });
+
+          const normalizedConversation = normalizeConversationDraft(
+            result.object?.conversation
+          );
+
+          if (normalizedConversation.length === 0) {
+            throw new Error("Generated conversation was empty.");
+          }
+
+          finalObject = {
+            conversation: normalizedConversation.map((item) => ({
+              speaker: item.speaker as PodcastSpeaker,
+              text: item.text,
+            })),
+          };
+          break;
+        } catch (error) {
+          lastError = error;
+          const retryable = isRetryablePodcastGenerationError(error);
+          console.warn(
+            `[Generate Podcast] LLM attempt ${attempt}/${GENERATE_PODCAST_MAX_ATTEMPTS} failed: ${getNestedErrorMessage(
+              error
+            )}`
+          );
+
+          if (!retryable || attempt === GENERATE_PODCAST_MAX_ATTEMPTS) {
+            throw error;
+          }
+        }
+      }
+
+      if (!finalObject) {
+        throw lastError instanceof Error
+          ? lastError
+          : new Error("Failed to generate podcast conversation.");
+      }
+
+      return createTextStreamResponse([
+        {
+          type: "partial",
+          data: finalObject,
+        },
+        {
+          type: "complete",
+          data: finalObject,
+        },
+      ]);
+    } catch (apiError: unknown) {
+      console.error("API error:", apiError);
+
+      // Check for specific error types
+      let errorMessage = 'Failed to generate podcast conversation';
+      const providerError = extractProviderError(apiError);
+
+      if (providerError.code === 'insufficient_quota') {
+        errorMessage = `${provider} API quota exceeded. Please check your billing and plan details.`;
+      } else if (providerError.code === 'invalid_api_key') {
+        errorMessage = `Invalid ${provider} API key. Please check your API key configuration.`;
+      } else if (providerError.message) {
+        errorMessage = providerError.code
+          ? `${provider} API error: ${providerError.message}`
+          : `Error: ${providerError.message}`;
+      }
+
+      return createErrorStreamResponse(errorMessage);
+    }
+  } catch (error) {
+    console.error("Error generating podcast:", error);
+    return NextResponse.json(
+      { error: "Failed to generate podcast conversation" },
+      { status: 500 }
+    );
+  }
+}

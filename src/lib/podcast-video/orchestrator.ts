@@ -2,7 +2,7 @@ import path from 'path';
 import { promises as fs } from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import { createDialogue } from '@/actions/dialogue';
-import { createGeminiDialogue } from '@/actions/gemini-tts';
+import { createGeminiDialogue, createOpenRouterGeminiDialogue } from '@/actions/gemini-tts';
 import { getEffectiveAdminSettings } from '@/lib/admin-settings';
 import {
   ensurePodcastVideoArchiveDir,
@@ -235,14 +235,17 @@ function roundSeconds(value: number): number {
 }
 
 function resolveRequestedTtsProvider(request: PodcastVideoJobRequest): TtsProvider {
-  const normalized = String(request.tts?.provider || 'elevenlabs').trim().toLowerCase();
+  const normalized = String(request.tts?.provider || 'openrouter').trim().toLowerCase();
   if (normalized === 'gemini') {
     return 'gemini';
+  }
+  if (normalized === 'openrouter') {
+    return 'openrouter';
   }
   if (normalized === 'omnivoice') {
     return 'omnivoice';
   }
-  return 'elevenlabs';
+  return normalized === 'elevenlabs' ? 'elevenlabs' : 'openrouter';
 }
 
 async function probeMediaDurationSeconds(filePath: string): Promise<number> {
@@ -339,7 +342,8 @@ async function concatAudioFilesToMp3(inputPaths: string[], outputPath: string): 
   });
 }
 
-async function synthesizeGeminiAudioBySegment(args: {
+async function synthesizeSegmentedGeminiLikeAudio(args: {
+  provider: 'gemini' | 'openrouter';
   jobId: string;
   jobDir: string;
   conversation: PodcastConversationItem[];
@@ -354,8 +358,9 @@ async function synthesizeGeminiAudioBySegment(args: {
   audioBuffer: Buffer;
   voiceSegments: NormalizedVoiceSegment[];
 }> {
-  const sourceDir = path.join(args.jobDir, 'gemini-source-segments');
-  const mp3Dir = path.join(args.jobDir, 'gemini-mp3-segments');
+  const providerLabel = args.provider === 'openrouter' ? 'OpenRouter Gemini TTS' : 'Gemini direct';
+  const sourceDir = path.join(args.jobDir, `${args.provider}-source-segments`);
+  const mp3Dir = path.join(args.jobDir, `${args.provider}-mp3-segments`);
   await fs.mkdir(sourceDir, { recursive: true });
   await fs.mkdir(mp3Dir, { recursive: true });
 
@@ -366,7 +371,8 @@ async function synthesizeGeminiAudioBySegment(args: {
   for (let index = 0; index < args.dialogueInputs.length; index += 1) {
     const input = args.dialogueInputs[index];
     const conversationItem = args.conversation[index];
-    const geminiResult = await createGeminiDialogue({
+    const synthesize = args.provider === 'openrouter' ? createOpenRouterGeminiDialogue : createGeminiDialogue;
+    const geminiResult = await synthesize({
       inputs: [input],
       apiKey: args.apiKey,
       modelId: args.modelId,
@@ -379,7 +385,7 @@ async function synthesizeGeminiAudioBySegment(args: {
     }
 
     if (!geminiResult.value.audioBase64) {
-      throw new Error(`Gemini TTS did not return audio data for segment ${index + 1}.`);
+      throw new Error(`${providerLabel} did not return audio data for segment ${index + 1}.`);
     }
 
     const paddedIndex = String(index + 1).padStart(4, '0');
@@ -408,7 +414,7 @@ async function synthesizeGeminiAudioBySegment(args: {
       args.jobId,
       'generating-audio',
       40,
-      `Tworze audio z Gemini direct ${index + 1}/${args.dialogueInputs.length}.`
+      `Tworze audio z ${providerLabel} ${index + 1}/${args.dialogueInputs.length}.`
     );
   }
 
@@ -957,19 +963,21 @@ export async function runPodcastVideoJob(
       jobId,
       'generating-audio',
       40,
-      requestedTtsProvider === 'gemini'
-        ? 'Tworze audio z Gemini direct.'
-        : requestedTtsProvider === 'omnivoice'
-          ? 'Tworze audio z OmniVoice.'
-          : 'Tworze MP3 i alignment z ElevenLabs.'
+      requestedTtsProvider === 'openrouter'
+        ? 'Tworze audio z OpenRouter Gemini TTS.'
+        : requestedTtsProvider === 'gemini'
+          ? 'Tworze audio z Gemini direct.'
+          : requestedTtsProvider === 'omnivoice'
+            ? 'Tworze audio z OmniVoice.'
+            : 'Tworze MP3 i alignment z ElevenLabs.'
     );
 
     const defaultVoice1 =
-      requestedTtsProvider === 'gemini'
+      requestedTtsProvider === 'gemini' || requestedTtsProvider === 'openrouter'
         ? DEFAULT_GEMINI_VOICES.voice1
         : DEFAULT_PODCAST_VIDEO_VOICES.voice1;
     const defaultVoice2 =
-      requestedTtsProvider === 'gemini'
+      requestedTtsProvider === 'gemini' || requestedTtsProvider === 'openrouter'
         ? DEFAULT_GEMINI_VOICES.voice2
         : DEFAULT_PODCAST_VIDEO_VOICES.voice2;
     const voice1 =
@@ -1000,21 +1008,24 @@ export async function runPodcastVideoJob(
       );
     }
 
-    if (requestedTtsProvider === 'gemini') {
-      const geminiApiKey =
+    if (requestedTtsProvider === 'gemini' || requestedTtsProvider === 'openrouter') {
+      const ttsApiKey =
         request.tts?.apiKey?.trim() ||
-        String(adminSettings.gemini_api_key || '').trim();
+        (requestedTtsProvider === 'openrouter'
+          ? String(adminSettings.openrouter_api_key || adminSettings.openai_api_key || '').trim()
+          : String(adminSettings.gemini_api_key || '').trim());
 
-      if (!geminiApiKey) {
-        throw new Error('Gemini API key is missing.');
+      if (!ttsApiKey) {
+        throw new Error(requestedTtsProvider === 'openrouter' ? 'OpenRouter API key is missing.' : 'Gemini API key is missing.');
       }
 
-      const geminiAudio = await synthesizeGeminiAudioBySegment({
+      const geminiAudio = await synthesizeSegmentedGeminiLikeAudio({
+        provider: requestedTtsProvider,
         jobId,
         jobDir: paths.dir,
         conversation,
         dialogueInputs,
-        apiKey: geminiApiKey,
+        apiKey: ttsApiKey,
         modelId: request.tts?.model || undefined,
         geminiStyle,
         geminiTempo,

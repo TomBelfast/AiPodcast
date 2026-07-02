@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { Agent, FormData as UndiciFormData, fetch as undiciFetch } from 'undici';
 import { createDialogue } from '@/actions/dialogue';
-import { createGeminiDialogue } from '@/actions/gemini-tts';
+import { createGeminiDialogue, createOpenRouterGeminiDialogue } from '@/actions/gemini-tts';
 import { getEffectiveAdminSettings } from '@/lib/admin-settings';
 import {
   normalizeGeminiStyle,
@@ -103,7 +103,7 @@ const SOULX_BASE_URL =
 const GEMINI_FEMALE_AUDIO_TEMPO = 1.1;
 
 type Segment = { speaker: string; text: string };
-type TtsEngine = 'omnivoice' | 'gemini' | 'elevenlabs';
+type TtsEngine = 'omnivoice' | 'gemini' | 'elevenlabs' | 'openrouter';
 type VoiceEntry = {
   id: string;
   gender: string;
@@ -120,6 +120,7 @@ type PipelineConfig = {
   voice2: string;
   ttsEngine: TtsEngine;
   geminiApiKey: string | null;
+  openrouterApiKey: string | null;
   geminiStyle: 'plain' | 'expressive-lite';
   geminiTempo: 'normal' | 'fast';
   elevenlabsApiKey: string | null;
@@ -292,8 +293,8 @@ function resolveFirstFrameStyle(value: unknown): FirstFrameStyle {
     titleOffsetY: readNumberInRange(
       value.titleOffsetY ?? value.title_offset_y,
       DEFAULT_FIRST_FRAME_STYLE.titleOffsetY,
-      -120,
-      120
+      -450,
+      450
     ),
     titleColor: normalizeHexColor(
       value.titleColor ?? value.title_color,
@@ -481,6 +482,16 @@ function resolvePodcastFilmGeminiApiKey(explicitKey?: string | null): string | n
 
   const adminSettings = getEffectiveAdminSettings();
   return String(adminSettings.gemini_api_key || '').trim() || null;
+}
+
+function resolvePodcastFilmOpenRouterApiKey(explicitKey?: string | null): string | null {
+  const normalizedExplicit = String(explicitKey || '').trim();
+  if (normalizedExplicit) {
+    return normalizedExplicit;
+  }
+
+  const adminSettings = getEffectiveAdminSettings();
+  return String(adminSettings.openrouter_api_key || adminSettings.openai_api_key || '').trim() || null;
 }
 
 function resolvePodcastFilmElevenLabsApiKey(explicitKey?: string | null): string | null {
@@ -1344,26 +1355,63 @@ function matchScriptToWhisperWords(
   return { tokens, matched, unmatched: tokens.length - matched };
 }
 
-async function synthesizeSegmentsWithGemini(
+function buildGeminiLikeTtsDebugPayload(args: {
+  provider: 'gemini' | 'openrouter';
+  model: string;
+  segments: Segment[];
+  completed?: number;
+  failure?: {
+    segment_index: number;
+    segment_total: number;
+    speaker: string;
+    text_length: number;
+    error: string;
+  };
+}): unknown {
+  return {
+    provider: args.provider,
+    model: args.model,
+    total_segments: args.segments.length,
+    completed_segments: args.completed || 0,
+    failure: args.failure || null,
+    segments: args.segments.map((segment, index) => ({
+      index: index + 1,
+      speaker: segment.speaker,
+      text_length: segment.text.length,
+      text: segment.text,
+    })),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+async function synthesizeSegmentsWithGeminiLikeProvider(
+  provider: 'gemini' | 'openrouter',
   jobId: string,
   jobDir: string,
   segments: Segment[],
   apiKey: string,
   geminiStyle: 'plain' | 'expressive-lite',
   geminiTempo: 'normal' | 'fast',
-  femaleVoice: string
+  femaleVoice: string,
+  modelId?: string | null
 ): Promise<GeminiSynthesisResult> {
-  const audioDir = path.join(jobDir, 'gemini-audio');
+  const audioDir = path.join(jobDir, `${provider}-audio`);
   await fs.mkdir(audioDir, { recursive: true });
 
   const startedAt = Date.now();
   let cumulativeOffset = 0;
-  let lastModel = 'gemini-3.1-flash-tts-preview';
+  let lastModel = modelId || (provider === 'openrouter' ? 'google/gemini-3.1-flash-tts-preview' : 'gemini-3.1-flash-tts-preview');
+  const debugPath = path.join(jobDir, provider + '-tts-debug.json');
+  await fs.writeFile(
+    debugPath,
+    JSON.stringify(buildGeminiLikeTtsDebugPayload({ provider, model: lastModel, segments }), null, 2) + '\n'
+  );
   const synthesizedSegments: GeminiAudioSegment[] = [];
 
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
-    const result = await createGeminiDialogue({
+    const synthesize = provider === 'openrouter' ? createOpenRouterGeminiDialogue : createGeminiDialogue;
+    const result = await synthesize({
       inputs: [
         {
           text: segment.text,
@@ -1371,16 +1419,37 @@ async function synthesizeSegmentsWithGemini(
         },
       ],
       apiKey,
+      modelId: modelId || undefined,
       geminiStyle,
       geminiTempo,
     });
 
     if (!result.ok) {
-      throw new Error(result.error);
+      await fs.writeFile(
+        debugPath,
+        JSON.stringify(
+          buildGeminiLikeTtsDebugPayload({
+            provider,
+            model: lastModel,
+            segments,
+            completed: synthesizedSegments.length,
+            failure: {
+              segment_index: i + 1,
+              segment_total: segments.length,
+              speaker: segment.speaker,
+              text_length: segment.text.length,
+              error: result.error,
+            },
+          }),
+          null,
+          2
+        ) + '\n'
+      );
+      throw new Error(result.error + " (segment " + (i + 1) + "/" + segments.length + ", speaker=" + segment.speaker + ", chars=" + segment.text.length + ")");
     }
 
     if (!result.value.audioBase64) {
-      throw new Error('Gemini TTS returned no audio payload.');
+      throw new Error(`${provider === 'openrouter' ? 'OpenRouter Gemini TTS' : 'Gemini TTS'} returned no audio payload.`);
     }
 
     lastModel = result.value.model || lastModel;
@@ -1390,6 +1459,7 @@ async function synthesizeSegmentsWithGemini(
     const audioPath = path.join(audioDir, audioFile);
     await fs.writeFile(audioPath, audioBuffer);
     if (
+      provider === 'gemini' &&
       result.value.mimeType === 'audio/wav' &&
       shouldSpeedUpGeminiFemaleSegment(segment.speaker, femaleVoice)
     ) {
@@ -1412,7 +1482,9 @@ async function synthesizeSegmentsWithGemini(
     await setPhase(
       jobId,
       'omnivoice_tts',
-      `Synthesizing Gemini audio ${i + 1}/${segments.length}…`,
+      provider === 'openrouter'
+        ? `Synthesizing OpenRouter Gemini TTS audio ${i + 1}/${segments.length}…`
+        : `Synthesizing Gemini audio ${i + 1}/${segments.length}…`,
       {
         current: i + 1,
         total: segments.length,
@@ -1425,7 +1497,9 @@ async function synthesizeSegmentsWithGemini(
     elapsed_ms: Date.now() - startedAt,
     model: lastModel,
     caption_warning:
-      'Gemini captions use Whisper word timing reconciliation when captions are burned; displayed text remains the cleaned script text.',
+      provider === 'openrouter'
+        ? 'OpenRouter Gemini TTS captions use Whisper word timing reconciliation when captions are burned; displayed text remains the cleaned script text.'
+        : 'Gemini captions use Whisper word timing reconciliation when captions are burned; displayed text remains the cleaned script text.',
   };
 }
 
@@ -2102,7 +2176,7 @@ async function preparePipelineInput(config: Pick<
 
   await reportProgress('Resolving voice registry…', 1, progressTotal);
 
-  if (config.ttsEngine === 'gemini') {
+  if (config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') {
     const omnivoiceRegistry = await fetchVoiceRegistryOptional();
     const resolvedGeminiVoices = resolveGeminiVoiceSelection(
       config.voice1,
@@ -2184,7 +2258,7 @@ async function preparePipelineInput(config: Pick<
   }
 
   const allowedInlineTags =
-    config.ttsEngine === 'gemini' && config.geminiStyle === 'expressive-lite'
+    (config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') && config.geminiStyle === 'expressive-lite'
       ? GEMINI_EXPRESSIVE_ALLOWED_INLINE_TAGS
       : undefined;
 
@@ -2268,7 +2342,7 @@ async function runBackgroundPipeline(
     'omnivoice_tts',
     config.ttsEngine === 'omnivoice'
       ? 'Synthesizing voice audio…'
-      : `Synthesizing ${config.ttsEngine === 'gemini' ? 'Gemini' : 'ElevenLabs'} audio 0/${segments.length}…`,
+      : `Synthesizing ${config.ttsEngine === 'openrouter' ? 'OpenRouter Gemini TTS' : config.ttsEngine === 'gemini' ? 'Gemini' : 'ElevenLabs'} audio 0/${segments.length}…`,
     config.ttsEngine === 'omnivoice'
       ? null
       : {
@@ -2295,21 +2369,27 @@ async function runBackgroundPipeline(
   let workerElapsedMs: number | undefined;
   let directData: GeminiSynthesisResult | null = null;
 
-  if (config.ttsEngine === 'gemini') {
-    const geminiApiKey = resolvePodcastFilmGeminiApiKey(config.geminiApiKey);
-    if (!geminiApiKey) {
+  if (config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') {
+    const ttsApiKey = config.ttsEngine === 'openrouter'
+      ? resolvePodcastFilmOpenRouterApiKey(config.openrouterApiKey)
+      : resolvePodcastFilmGeminiApiKey(config.geminiApiKey);
+    if (!ttsApiKey) {
       throw new PipelineInputError(403, {
-        error: 'Gemini API key is not configured for podcast-film.',
+        error: config.ttsEngine === 'openrouter'
+          ? 'OpenRouter API key is not configured for podcast-film.'
+          : 'Gemini API key is not configured for podcast-film.',
       });
     }
-    directData = await synthesizeSegmentsWithGemini(
+    directData = await synthesizeSegmentsWithGeminiLikeProvider(
+      config.ttsEngine,
       jobId,
       paths.dir,
       segments,
-      geminiApiKey,
+      ttsApiKey,
       config.geminiStyle,
       config.geminiTempo,
-      femaleVoice
+      femaleVoice,
+      config.ttsModel
     );
   } else if (config.ttsEngine === 'elevenlabs') {
     const elevenlabsApiKey = resolvePodcastFilmElevenLabsApiKey(config.elevenlabsApiKey);
@@ -2460,7 +2540,7 @@ async function runBackgroundPipeline(
 
   const directClassicAlignmentMode = resolveDirectClassicAlignmentMode(config.ttsEngine);
   const useWhisperReconciliation =
-    config.ttsEngine === 'omnivoice' || config.ttsEngine === 'gemini';
+    config.ttsEngine === 'omnivoice' || config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter';
   const useDirectClassicBaseline =
     !useWhisperReconciliation &&
     config.captionStyle === 'classic' &&
@@ -2499,8 +2579,8 @@ async function runBackgroundPipeline(
             : 'Estimating pseudo-token timing'
           : 'Estimating word timing';
     const whisperApiKey =
-      config.ttsEngine === 'gemini' ? resolvePodcastFilmWhisperApiKey() : null;
-    if (config.ttsEngine === 'gemini' && !whisperApiKey) {
+      (config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') ? resolvePodcastFilmWhisperApiKey() : null;
+    if ((config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') && !whisperApiKey) {
       captionWarnings.push(
         'OpenAI Whisper API key is missing; Gemini caption timings will be interpolated from segment duration.'
       );
@@ -2537,7 +2617,7 @@ async function runBackgroundPipeline(
               `transcribe-words failed for ${manifestSeg.audio_file}: ${describeError(error).slice(0, 160)}`
             );
           }
-        } else if (config.ttsEngine === 'gemini' && whisperApiKey) {
+        } else if ((config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') && whisperApiKey) {
           const manifestSeg = manifestSegments[i] as GeminiAudioSegment;
           try {
             whisperWords = await transcribeAudioFileWords(
@@ -2704,7 +2784,7 @@ async function runBackgroundPipeline(
     pipeline: 'podcast-film-v1',
     tts_engine: config.ttsEngine,
     direct_tts_model: directData?.model,
-    gemini_model: config.ttsEngine === 'gemini' ? directData?.model : undefined,
+    gemini_model: (config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') ? directData?.model : undefined,
     soulx_model: config.soulxModel,
     use_face_crop: config.useFaceCrop,
     image_rotation_seed: config.imageRotationSeed,
@@ -2739,7 +2819,7 @@ async function runBackgroundPipeline(
     timings: {
       tts_ms: ttsTimingMs,
       omnivoice_ms: config.ttsEngine === 'omnivoice' ? workerElapsedMs : undefined,
-      gemini_ms: config.ttsEngine === 'gemini' ? directData!.elapsed_ms : undefined,
+      gemini_ms: (config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter') ? directData!.elapsed_ms : undefined,
       elevenlabs_ms: config.ttsEngine === 'elevenlabs' ? directData!.elapsed_ms : undefined,
       soulx_total_ms: renderElapsedMs,
       concat_ms: concatResult.elapsed_ms,
@@ -2758,8 +2838,8 @@ async function runBackgroundPipeline(
       soulx_url: `${SOULX_BASE_URL}/generate`,
     },
     note:
-      config.ttsEngine === 'gemini'
-        ? `v1-gemini: per-segment Gemini WAV + SoulX render + ${captionAlignmentMode === 'whisper_reconciled' ? 'Whisper timing reconciled onto cleaned original segment text.' : captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
+      (config.ttsEngine === 'gemini' || config.ttsEngine === 'openrouter')
+        ? `v1-${config.ttsEngine}: per-segment Gemini WAV + SoulX render + ${captionAlignmentMode === 'whisper_reconciled' ? 'Whisper timing reconciled onto cleaned original segment text.' : captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
         : config.ttsEngine === 'elevenlabs'
           ? `v1-elevenlabs: per-segment ElevenLabs MP3 + SoulX render + ${captionAlignmentMode === 'classic_pseudo_token' ? 'classic pseudo-token cue alignment from original segment text.' : captionAlignmentMode === 'segment_cues' ? 'baseline segment cue timing for classic captions.' : 'estimated caption timing from segment duration.'}`
           : 'v1: per-segment MP4 + concat + word-level ASS captions burned via Whisper timing reconciliation.',
@@ -2784,8 +2864,8 @@ export async function POST(request: NextRequest) {
     const avatarBody = isPlainObject(body.avatar) ? body.avatar : {};
     const reviewBody = isPlainObject(body.review) ? body.review : {};
     const ttsEngine = normalizeTtsProvider(
-      ttsBody.provider || body.tts_engine || body.ttsProvider || body.provider || 'omnivoice',
-      'omnivoice'
+      ttsBody.provider || body.tts_engine || body.ttsProvider || body.provider || 'openrouter',
+      'openrouter'
     ) as TtsEngine;
     const avatarProvider = normalizeAvatarProvider(avatarBody.provider || 'soulx');
     const reviewMode = normalizeReviewMode(reviewBody.mode || body.review_mode || body.reviewMode);
@@ -2801,13 +2881,13 @@ export async function POST(request: NextRequest) {
     }
     const language = String(body.language || body.caption_language || 'pl').trim() || 'pl';
     const defaultVoice1 =
-      ttsEngine === 'gemini'
+      ttsEngine === 'gemini' || ttsEngine === 'openrouter'
         ? DEFAULT_GEMINI_VOICES.voice1
         : ttsEngine === 'elevenlabs'
           ? DEFAULT_ELEVENLABS_VOICES.voice1
           : 'host_a';
     const defaultVoice2 =
-      ttsEngine === 'gemini'
+      ttsEngine === 'gemini' || ttsEngine === 'openrouter'
         ? DEFAULT_GEMINI_VOICES.voice2
         : ttsEngine === 'elevenlabs'
           ? DEFAULT_ELEVENLABS_VOICES.voice2
@@ -2817,8 +2897,12 @@ export async function POST(request: NextRequest) {
     const geminiStyle = normalizeGeminiStyle(ttsBody.geminiStyle || body.geminiStyle);
     const geminiTempo = normalizeGeminiTempo(ttsBody.geminiTempo || body.geminiTempo);
     const geminiApiKey =
-      typeof (ttsBody.apiKey || body.gemini_api_key) === 'string'
+      typeof (ttsBody.apiKey || body.gemini_api_key) === 'string' && ttsEngine === 'gemini'
         ? String(ttsBody.apiKey || body.gemini_api_key).trim()
+        : '';
+    const openrouterApiKey =
+      typeof (ttsBody.apiKey || body.openrouter_api_key) === 'string' && ttsEngine === 'openrouter'
+        ? String(ttsBody.apiKey || body.openrouter_api_key).trim()
         : '';
     const elevenlabsApiKey =
       typeof body.elevenlabs_api_key === 'string'
@@ -2963,6 +3047,7 @@ export async function POST(request: NextRequest) {
       voice2,
       ttsEngine,
       geminiApiKey: geminiApiKey || null,
+      openrouterApiKey: openrouterApiKey || null,
       geminiStyle,
       geminiTempo,
       elevenlabsApiKey: elevenlabsApiKey || null,
@@ -2992,6 +3077,16 @@ export async function POST(request: NextRequest) {
         {
           error: 'Gemini API key is not configured for podcast-film.',
           code: 'MISSING_GEMINI_KEY',
+        },
+        { status: 403 }
+      );
+    }
+
+    if (ttsEngine === 'openrouter' && !dryRun && !resolvePodcastFilmOpenRouterApiKey(openrouterApiKey)) {
+      return NextResponse.json(
+        {
+          error: 'OpenRouter API key is not configured for podcast-film.',
+          code: 'MISSING_OPENROUTER_KEY',
         },
         { status: 403 }
       );

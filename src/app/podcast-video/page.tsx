@@ -15,7 +15,7 @@ import {
 type PodcastVideoDeckTab = 'generator' | 'style-preview';
 type InputMode = 'script' | 'conversation' | 'transcript';
 type WorkflowMode = 'workflow-a' | 'workflow-b';
-type VideoTtsProvider = 'elevenlabs' | 'gemini' | 'omnivoice';
+type VideoTtsProvider = 'elevenlabs' | 'gemini' | 'omnivoice' | 'openrouter';
 type ReviewMode = 'off' | 'pause_after_conversation';
 type VoiceGenderBucket = 'male' | 'female' | 'unknown';
 type GeminiStyle = 'plain' | 'expressive-lite';
@@ -724,8 +724,8 @@ export default function PodcastVideoPage() {
   const availableProviders = useMemo(
     () =>
       workflowMode === 'workflow-b'
-        ? (['gemini', 'elevenlabs', 'omnivoice'] as VideoTtsProvider[])
-        : (['gemini', 'elevenlabs'] as VideoTtsProvider[]),
+        ? (['openrouter', 'openrouter', 'gemini', 'elevenlabs', 'omnivoice'] as VideoTtsProvider[])
+        : (['openrouter', 'gemini', 'elevenlabs'] as VideoTtsProvider[]),
     [workflowMode]
   );
 
